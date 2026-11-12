@@ -293,7 +293,7 @@ class GameRoom {
             const distance = PROJECTILE_SPEED * delta;
             projectile.x += Math.sin(radians) * distance;
             projectile.z += Math.cos(radians) * distance;
-            projectile.y += Math.sin(projectile.pitch * Math.PI / 180) *
+            projectile.y -= Math.sin(projectile.pitch * Math.PI / 180) *
                 distance;
             projectile.distance += distance;
 
@@ -309,6 +309,9 @@ class GameRoom {
                     userId: target.userId,
                     attackerId: projectile.ownerId,
                     health: target.health,
+                    x: round(projectile.x),
+                    y: round(projectile.y),
+                    z: round(projectile.z),
                     projectileId: projectile.id
                 });
                 if (target.health === 0) {

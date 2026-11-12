@@ -124,6 +124,35 @@ test("server-side projectiles damage only enemies and award a kill", () => {
     assert.equal(target.health, 100);
 });
 
+test("one server projectile damages only one tank once", () => {
+    const room = new GameRoom("room-single-impact");
+    room.addPlayer(player(1, 1));
+    room.addPlayer(player(2, 2));
+    const shooter = room.players.get("1");
+    const target = room.players.get("2");
+    shooter.x = 0;
+    shooter.z = 0;
+    shooter.aimHeading = 90;
+    target.x = 4;
+    target.z = 0;
+
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        aimHeading: 90
+    }, 10_000);
+    const hitState = room.tick(0.05, 10_050);
+    assert.equal(target.health, 75);
+    assert.equal(hitState.events.filter(event =>
+        event.type === "playerHit"
+    ).length, 1);
+    assert.equal(hitState.projectiles.length, 0);
+
+    room.tick(0.05, 10_100);
+    assert.equal(target.health, 75);
+});
+
 test("server-side projectiles destroy an enemy player's deployed drone", () => {
     const room = new GameRoom("room-drone");
     room.addPlayer(player(1, 1));
@@ -161,6 +190,22 @@ test("server-side projectiles destroy an enemy player's deployed drone", () => {
         event.userId === "2" &&
         event.attackerId === "1"
     ));
+});
+
+test("projectile vertical travel matches Unity's cannon pitch direction", () => {
+    const room = new GameRoom("room-projectile-pitch");
+    room.addPlayer(player(1));
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        aimHeading: 90,
+        aimPitch: -20
+    }, 10_000);
+
+    const state = room.tick(0.05, 10_050);
+    assert.equal(state.projectiles.length, 1);
+    assert.ok(state.projectiles[0].y > 1.5);
 });
 
 test("holding fire produces cooldown-limited projectiles and preserves aim", () => {
