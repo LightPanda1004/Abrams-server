@@ -124,6 +124,45 @@ test("server-side projectiles damage only enemies and award a kill", () => {
     assert.equal(target.health, 100);
 });
 
+test("server-side projectiles destroy an enemy player's deployed drone", () => {
+    const room = new GameRoom("room-drone");
+    room.addPlayer(player(1, 1));
+    room.addPlayer(player(2, 2));
+    const shooter = room.players.get("1");
+    const target = room.players.get("2");
+    shooter.x = 0;
+    shooter.z = 0;
+    shooter.aimHeading = 90;
+    shooter.aimPitch = 0;
+    target.x = 50;
+
+    assert.equal(room.setInput("2", {
+        throttle: 0,
+        steering: 0,
+        fire: false,
+        droneActive: true,
+        droneX: 5,
+        droneY: 1.5,
+        droneZ: 0
+    }), true);
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        aimHeading: 90,
+        aimPitch: 0
+    }, 10_000);
+
+    const state = room.tick(0.05, 10_050);
+    assert.equal(target.droneActive, false);
+    assert.equal(target.droneDestroyed, true);
+    assert.ok(state.events.some(event =>
+        event.type === "droneHit" &&
+        event.userId === "2" &&
+        event.attackerId === "1"
+    ));
+});
+
 test("holding fire produces cooldown-limited projectiles and preserves aim", () => {
     const room = new GameRoom("room-fire");
     room.addPlayer(player(1));
