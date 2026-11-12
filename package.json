@@ -1,0 +1,20 @@
+{
+  "name": "abrams-online-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Accounts, matchmaking, and dedicated-server coordination for Abrams",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node --env-file=.env src/index.js",
+    "start:game-ws-gateway": "node --env-file=.env src/game-ws-gateway.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ethers": "^6.17.0",
+    "pg": "^8.13.1",
+    "ws": "^8.18.0"
+  }
+}
