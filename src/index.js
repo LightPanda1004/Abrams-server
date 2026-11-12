@@ -767,7 +767,7 @@ async function route(request, response) {
                     AND rm.joined_at > NOW() - INTERVAL '45 seconds'
                  WHERE r.status IN ('waiting', 'playing')
                    AND gs.heartbeat_at > NOW() - INTERVAL '20 seconds'
-                 GROUP BY r.id, gs.host, gs.port
+                 GROUP BY r.id, gs.host, gs.port, gs.ws_url
                  ORDER BY r.created_at DESC
                  LIMIT 100`
             );
