@@ -382,6 +382,76 @@ test("one server projectile damages only one tank once", () => {
     assert.equal(target.health, 175);
 });
 
+test("a shell detonates on a friendly tank without damaging it", () => {
+    const room = new GameRoom("room-friendly-shell-impact");
+    room.addPlayer(player(1, 1));
+    room.addPlayer(player(2, 1));
+    const shooter = room.players.get("1");
+    const teammate = room.players.get("2");
+    shooter.x = 0;
+    shooter.z = 0;
+    shooter.aimHeading = 90;
+    teammate.x = 4;
+    teammate.z = 0;
+
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        aimHeading: 90
+    }, 10_000);
+    const impactState = room.tick(0.05, 10_050);
+
+    assert.equal(teammate.health, 200);
+    assert.equal(room.projectiles.length, 0);
+    assert.equal(impactState.events.filter(event =>
+        event.type === "projectileImpact"
+    ).length, 1);
+    assert.equal(impactState.events.some(event =>
+        event.type === "playerHit"
+    ), false);
+});
+
+test("environment impact reports must match the owner's recent projectile path", () => {
+    const room = new GameRoom("room-environment-shell-impact");
+    room.addPlayer(player(1, 1));
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        aimHeading: 90
+    }, 10_000);
+    room.tick(0.05, 10_050);
+    const projectile = room.projectiles[0];
+    const validImpact = {
+        projectileId: projectile.id,
+        x: projectile.x - 2,
+        y: projectile.y,
+        z: projectile.z,
+        normalX: -1,
+        normalY: 0,
+        normalZ: 0
+    };
+    const invalidImpact = {
+        ...validImpact,
+        x: 90
+    };
+
+    assert.equal(room.reportProjectileImpact("1", invalidImpact), false);
+    assert.equal(room.projectiles.length, 1);
+    assert.equal(room.reportProjectileImpact("2", validImpact), false);
+    assert.equal(room.reportProjectileImpact("1", validImpact), true);
+    assert.equal(room.reportProjectileImpact("1", validImpact), false);
+    assert.equal(room.projectiles.length, 0);
+
+    const impactState = room.tick(0.05, 10_100);
+    assert.equal(impactState.events.filter(event =>
+        event.type === "projectileImpact"
+    ).length, 1);
+    assert.equal(impactState.events[0].projectileId, projectile.id);
+    assert.equal(impactState.events[0].normalX, -1);
+});
+
 test("shell contact is resolved against tank collider bounds", () => {
     const room = new GameRoom("room-tank-hitbox");
     room.addPlayer(player(1, 1));

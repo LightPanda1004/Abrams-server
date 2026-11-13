@@ -312,6 +312,58 @@ class GameRoom {
         return true;
     }
 
+    reportProjectileImpact(userId, report) {
+        if (typeof userId !== "string" || !report ||
+            !Number.isSafeInteger(report.projectileId) ||
+            report.projectileId <= 0 ||
+            ![report.x, report.y, report.z,
+                report.normalX, report.normalY, report.normalZ]
+                .every(Number.isFinite)) {
+            return false;
+        }
+
+        const projectileIndex = this.projectiles.findIndex(projectile =>
+            projectile.id === report.projectileId &&
+            projectile.ownerId === userId
+        );
+        if (projectileIndex < 0)
+            return false;
+
+        const projectile = this.projectiles[projectileIndex];
+        const normalLength = Math.hypot(
+            report.normalX,
+            report.normalY,
+            report.normalZ
+        );
+        if (normalLength < 0.5 || normalLength > 1.5 ||
+            Math.abs(report.x) > MAX_WORLD_COORDINATE + 20 ||
+            Math.abs(report.z) > MAX_WORLD_COORDINATE + 20 ||
+            report.y < -20 || report.y > 100)
+            return false;
+
+        const impact = { x: report.x, y: report.y, z: report.z };
+        const path = projectile.pathHistory || [];
+        if (!path.some(segment =>
+            pointSegmentDistanceSquared(impact, segment.start, segment.end) <=
+                1.5 * 1.5
+        ))
+            return false;
+
+        this.pendingEvents.push({
+            type: "projectileImpact",
+            userId,
+            projectileId: projectile.id,
+            x: round(impact.x),
+            y: round(impact.y),
+            z: round(impact.z),
+            normalX: round(report.normalX / normalLength),
+            normalY: round(report.normalY / normalLength),
+            normalZ: round(report.normalZ / normalLength)
+        });
+        this.projectiles.splice(projectileIndex, 1);
+        return true;
+    }
+
     tick(deltaSeconds, now = Date.now()) {
         const delta = clamp(deltaSeconds, 0, 0.1);
         if (this.matchEnded) {
@@ -484,7 +536,8 @@ class GameRoom {
                 ? clamp(input.fireOriginY, -10, 50)
                 : 1.5,
             distance: 0,
-            createdAt: now
+            createdAt: now,
+            pathHistory: []
         };
     }
 
@@ -504,11 +557,22 @@ class GameRoom {
             projectile.z += Math.cos(radians) * horizontalDistance;
             projectile.y -= Math.sin(pitchRadians) * distance;
             projectile.distance += distance;
+            projectile.pathHistory.push({
+                start: previousPosition,
+                end: {
+                    x: projectile.x,
+                    y: projectile.y,
+                    z: projectile.z
+                }
+            });
+            if (projectile.pathHistory.length > 20)
+                projectile.pathHistory.shift();
 
             let target = null;
             let impact = null;
+            let nearestDistanceSquared = Infinity;
             for (const player of this.players.values()) {
-                if (!player.alive || player.team === projectile.team)
+                if (!player.alive || player.userId === projectile.ownerId)
                     continue;
                 const contact = getTankSegmentContact(
                     previousPosition,
@@ -516,24 +580,42 @@ class GameRoom {
                     player
                 );
                 if (contact) {
+                    const dx = contact.x - previousPosition.x;
+                    const dy = contact.y - previousPosition.y;
+                    const dz = contact.z - previousPosition.z;
+                    const distanceSquared = dx * dx + dy * dy + dz * dz;
+                    if (distanceSquared >= nearestDistanceSquared)
+                        continue;
                     target = player;
                     impact = contact;
-                    break;
+                    nearestDistanceSquared = distanceSquared;
                 }
             }
             if (target) {
-                target.health = Math.max(0, target.health - PROJECTILE_DAMAGE);
-                this.pendingEvents.push({
-                    type: "playerHit",
+                const event = {
+                    type: target.team === projectile.team
+                        ? "projectileImpact"
+                        : "playerHit",
                     userId: target.userId,
                     attackerId: projectile.ownerId,
-                    health: target.health,
                     x: round(impact.x),
                     y: round(impact.y),
                     z: round(impact.z),
                     projectileId: projectile.id
-                });
-                this.handleTankDestroyed(target, projectile.ownerId);
+                };
+                const normal = projectileImpactNormal(projectile);
+                event.normalX = round(normal.x);
+                event.normalY = round(normal.y);
+                event.normalZ = round(normal.z);
+                if (target.team !== projectile.team) {
+                    target.health = Math.max(
+                        0,
+                        target.health - PROJECTILE_DAMAGE
+                    );
+                    event.health = target.health;
+                    this.handleTankDestroyed(target, projectile.ownerId);
+                }
+                this.pendingEvents.push(event);
                 continue;
             }
 
@@ -574,11 +656,33 @@ class GameRoom {
                     z: round(droneImpact.z),
                     projectileId: projectile.id
                 });
+                const normal = projectileImpactNormal(projectile);
+                Object.assign(
+                    this.pendingEvents[this.pendingEvents.length - 1],
+                    {
+                        normalX: round(normal.x),
+                        normalY: round(normal.y),
+                        normalZ: round(normal.z)
+                    }
+                );
                 continue;
             }
 
             if (projectile.distance < PROJECTILE_RANGE) {
                 remaining.push(projectile);
+            } else {
+                const normal = projectileImpactNormal(projectile);
+                this.pendingEvents.push({
+                    type: "projectileImpact",
+                    userId: projectile.ownerId,
+                    projectileId: projectile.id,
+                    x: round(projectile.x),
+                    y: round(projectile.y),
+                    z: round(projectile.z),
+                    normalX: round(normal.x),
+                    normalY: round(normal.y),
+                    normalZ: round(normal.z)
+                });
             }
         }
         this.projectiles = remaining;
@@ -804,6 +908,41 @@ function getTankSegmentContact(start, end, tank) {
         x: start.x + (end.x - start.x) * fraction,
         y: start.y + (end.y - start.y) * fraction,
         z: start.z + (end.z - start.z) * fraction
+    };
+}
+
+function pointSegmentDistanceSquared(point, start, end) {
+    const segment = {
+        x: end.x - start.x,
+        y: end.y - start.y,
+        z: end.z - start.z
+    };
+    const lengthSquared =
+        segment.x * segment.x +
+        segment.y * segment.y +
+        segment.z * segment.z;
+    const projection = lengthSquared > 0
+        ? clamp(
+            ((point.x - start.x) * segment.x +
+                (point.y - start.y) * segment.y +
+                (point.z - start.z) * segment.z) / lengthSquared,
+            0,
+            1
+        )
+        : 0;
+    const dx = point.x - (start.x + segment.x * projection);
+    const dy = point.y - (start.y + segment.y * projection);
+    const dz = point.z - (start.z + segment.z * projection);
+    return dx * dx + dy * dy + dz * dz;
+}
+
+function projectileImpactNormal(projectile) {
+    const heading = projectile.heading * Math.PI / 180;
+    const pitch = projectile.pitch * Math.PI / 180;
+    return {
+        x: -Math.sin(heading) * Math.cos(pitch),
+        y: Math.sin(pitch),
+        z: -Math.cos(heading) * Math.cos(pitch)
     };
 }
 

@@ -605,6 +605,10 @@ function createGateway(config) {
             }
 
             const roomRuntime = roomsById.get(roomId);
+            if (roomRuntime && message.type === "projectileImpact") {
+                roomRuntime.gameRoom.reportProjectileImpact(userId, message);
+                return;
+            }
             if (!roomRuntime || message.type !== "input" ||
                 !roomRuntime.gameRoom.setInput(userId, message)) {
                 socket.close(4002, "Invalid game input.");
