@@ -71,6 +71,7 @@ class GameRoom {
             speedBoostAmount: 0,
             speed: 0,
             droneActive: false,
+            droneFlying: false,
             droneDestroyed: false,
             droneX: 0,
             droneY: 0,
@@ -145,6 +146,8 @@ class GameRoom {
                 ) <= 0.0001)) ||
             (input.droneActive !== undefined &&
                 typeof input.droneActive !== "boolean") ||
+            (input.droneFlying !== undefined &&
+                typeof input.droneFlying !== "boolean") ||
             (input.droneActive === true &&
                 [input.droneX, input.droneY, input.droneZ].some(value =>
                     typeof value !== "number" || !Number.isFinite(value)))) {
@@ -188,8 +191,13 @@ class GameRoom {
             player.aimPitch = clamp(input.aimPitch, -20, 45);
         }
         if (typeof input.droneActive === "boolean" &&
-            !player.droneDestroyed) {
+            !player.droneDestroyed && player.alive) {
             player.droneActive = input.droneActive;
+            player.droneFlying = input.droneActive &&
+                input.droneFlying === true;
+        } else if (!player.alive) {
+            player.droneActive = false;
+            player.droneFlying = false;
         }
         if (player.droneActive) {
             player.droneX = clamp(input.droneX, -MAX_WORLD_COORDINATE,
@@ -288,6 +296,7 @@ class GameRoom {
                 aimPitch: round(player.aimPitch),
                 speed: round(player.speed),
                 droneActive: player.droneActive,
+                droneFlying: player.droneFlying,
                 droneDestroyed: player.droneDestroyed,
                 droneX: round(player.droneX),
                 droneY: round(player.droneY),
@@ -325,6 +334,7 @@ class GameRoom {
                 aimPitch: round(player.aimPitch),
                 speed: round(player.speed),
                 droneActive: player.droneActive,
+                droneFlying: player.droneFlying,
                 droneDestroyed: player.droneDestroyed,
                 droneX: round(player.droneX),
                 droneY: round(player.droneY),
@@ -432,7 +442,8 @@ class GameRoom {
             let droneTarget = null;
             let droneImpact = null;
             for (const player of this.players.values()) {
-                if (!player.droneActive || player.droneDestroyed ||
+                if (!player.droneActive || !player.droneFlying ||
+                    player.droneDestroyed ||
                     player.team === projectile.team) {
                     continue;
                 }
@@ -454,6 +465,7 @@ class GameRoom {
             }
             if (droneTarget) {
                 droneTarget.droneActive = false;
+                droneTarget.droneFlying = false;
                 droneTarget.droneDestroyed = true;
                 this.pendingEvents.push({
                     type: "droneHit",
@@ -513,18 +525,21 @@ class GameRoom {
 
     resolveDroneCollisions(now) {
         for (const owner of this.players.values()) {
-            if (!owner.alive || !owner.droneActive ||
+            if (!owner.alive || !owner.droneActive || !owner.droneFlying ||
                 owner.droneDestroyed) {
                 continue;
             }
             const target = [...this.players.values()].find(player =>
                 player.alive &&
+                player.userId !== owner.userId &&
+                player.team !== owner.team &&
                 tankIntersectsDrone(player, owner)
             );
             if (!target)
                 continue;
 
             owner.droneActive = false;
+            owner.droneFlying = false;
             owner.droneDestroyed = true;
             target.health = Math.max(
                 0,
@@ -549,6 +564,7 @@ class GameRoom {
 
         target.alive = false;
         target.droneActive = false;
+        target.droneFlying = false;
         target.speedBoostAmount = 0;
         target.deaths++;
         target.respawnAt = now + RESPAWN_DELAY_MS;

@@ -250,6 +250,7 @@ test("deployed drone colliding with a tank explodes and applies damage", () => {
     const owner = room.players.get("1");
     const target = room.players.get("2");
     owner.droneActive = true;
+    owner.droneFlying = true;
     owner.droneX = target.x;
     owner.droneY = 1;
     owner.droneZ = target.z;
@@ -265,6 +266,116 @@ test("deployed drone colliding with a tank explodes and applies damage", () => {
         event.attackerId === owner.userId &&
         event.health === 100
     ));
+});
+
+test("drone in launch phase ignores owner and friendly tanks", () => {
+    const room = new GameRoom("room-drone-launch-phase");
+    room.addPlayer(player(1, 1));
+    room.addPlayer(player(2, 1));
+    const owner = room.players.get("1");
+    const teammate = room.players.get("2");
+    owner.droneActive = true;
+    owner.droneFlying = false;
+    owner.droneX = owner.x;
+    owner.droneY = 1;
+    owner.droneZ = owner.z;
+    teammate.x = owner.x;
+    teammate.z = owner.z;
+
+    const launchState = room.tick(0.05, 20_000);
+
+    assert.equal(owner.droneActive, true);
+    assert.equal(owner.droneFlying, false);
+    assert.equal(owner.droneDestroyed, false);
+    assert.equal(teammate.health, 200);
+    assert.equal(launchState.events.some(event =>
+        event.type === "droneCollision"
+    ), false);
+
+    owner.droneFlying = true;
+    const flightState = room.tick(0.05, 20_050);
+    assert.equal(owner.droneActive, true);
+    assert.equal(owner.droneFlying, true);
+    assert.equal(owner.droneDestroyed, false);
+    assert.equal(teammate.health, 200);
+    assert.equal(flightState.events.some(event =>
+        event.type === "droneCollision"
+    ), false);
+});
+
+test("server does not resolve a drone collision during deployment", () => {
+    const room = new GameRoom("room-drone-deploying");
+    room.addPlayer(player(1, 1));
+    room.addPlayer(player(2, 2));
+    const owner = room.players.get("1");
+    const enemy = room.players.get("2");
+    const droneInput = {
+        throttle: 0,
+        steering: 0,
+        fire: false,
+        droneActive: true,
+        droneFlying: false,
+        droneX: enemy.x,
+        droneY: 1,
+        droneZ: enemy.z
+    };
+    assert.equal(room.setInput("1", droneInput), true);
+
+    const launchState = room.tick(0.05, 20_000);
+    assert.equal(owner.droneActive, true);
+    assert.equal(owner.droneFlying, false);
+    assert.equal(owner.droneDestroyed, false);
+    assert.equal(enemy.health, 200);
+    assert.equal(launchState.events.some(event =>
+        event.type === "droneCollision"
+    ), false);
+
+    assert.equal(room.setInput("1", {
+        ...droneInput,
+        droneFlying: true
+    }), true);
+    const flightState = room.tick(0.05, 20_050);
+    assert.equal(owner.droneActive, false);
+    assert.equal(owner.droneFlying, false);
+    assert.equal(owner.droneDestroyed, true);
+    assert.equal(enemy.health, 100);
+    assert.equal(flightState.events.filter(event =>
+        event.type === "droneCollision"
+    ).length, 1);
+});
+
+test("shell contact does not detonate a drone before flight", () => {
+    const room = new GameRoom("room-drone-shell-during-launch");
+    room.addPlayer(player(1, 1));
+    room.addPlayer(player(2, 2));
+    const shooter = room.players.get("1");
+    const droneOwner = room.players.get("2");
+    shooter.x = 0;
+    shooter.z = 0;
+    shooter.aimHeading = 90;
+    droneOwner.x = 50;
+    droneOwner.droneActive = true;
+    droneOwner.droneFlying = false;
+    droneOwner.droneX = 8;
+    droneOwner.droneY = 1.5;
+    droneOwner.droneZ = 0;
+
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        aimHeading: 90,
+        hasFireOrigin: true,
+        fireOriginX: 0,
+        fireOriginY: 1.5,
+        fireOriginZ: 0
+    }, 10_000);
+    room.tick(0.05, 10_050);
+
+    assert.equal(droneOwner.droneActive, true);
+    assert.equal(droneOwner.droneFlying, false);
+    assert.equal(droneOwner.droneDestroyed, false);
+    assert.equal(room.projectiles.length, 1);
 });
 
 test("one server projectile damages only one tank once", () => {
@@ -365,6 +476,7 @@ test("server-side projectiles destroy an enemy player's deployed drone", () => {
         steering: 0,
         fire: false,
         droneActive: true,
+        droneFlying: true,
         droneX: 5,
         droneY: 1.5,
         droneZ: 0
