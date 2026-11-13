@@ -816,7 +816,7 @@ async function route(request, response) {
                            AND heartbeat_at > NOW() - INTERVAL '20 seconds'
                          ORDER BY heartbeat_at DESC
                          LIMIT 1
-                         FOR UPDATE SKIP LOCKED`
+                         FOR UPDATE`
                     );
                     const server = serverResult.rows[0];
                     if (!server) {
@@ -832,10 +832,6 @@ async function route(request, response) {
                         [name, user.sub, server.id, Math.min(ROOM_CAPACITY, server.max_players)]
                     );
                     const createdRoom = created.rows[0];
-                    await client.query(
-                        "UPDATE game_servers SET status = 'busy', current_room_id = $1 WHERE id = $2",
-                        [createdRoom.id, server.id]
-                    );
                     await client.query(
                         "INSERT INTO room_members (room_id, user_id, team, player_name) VALUES ($1, $2, $3, $4)",
                         [createdRoom.id, user.sub, teamId(body.team), playerName]
@@ -1170,12 +1166,15 @@ async function route(request, response) {
             const result = await pool.query(
                 `SELECT r.id::TEXT AS id, r.name, r.status, r.max_players
                  FROM rooms r JOIN game_servers gs ON gs.id = r.server_id
-                 WHERE gs.id = $1 AND gs.current_room_id = r.id
+                 WHERE gs.id = $1
                    AND r.status IN ('waiting', 'playing')
-                 LIMIT 1`,
+                 ORDER BY r.created_at ASC`,
                 [id]
             );
-            respond(response, 200, { room: result.rows[0] || null });
+            respond(response, 200, {
+                rooms: result.rows,
+                room: result.rows[0] || null
+            });
             return;
         }
         if (method === "POST" && path === "/api/server/tickets/validate") {
@@ -1244,13 +1243,6 @@ async function route(request, response) {
                     await client.query(
                         "DELETE FROM room_members WHERE room_id = $1",
                         [roomId]
-                    );
-                }
-                if (action === "complete") {
-                    await client.query(
-                        `UPDATE game_servers SET status = 'ready', current_room_id = NULL, heartbeat_at = NOW()
-                         WHERE id = $1 AND current_room_id = $2`,
-                        [body.serverId, roomId]
                     );
                 }
             });

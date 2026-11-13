@@ -90,17 +90,25 @@ function createGateway(config) {
         perMessageDeflate: false
     });
     const socketsByUserId = new Map();
-    let activeRoom = null;
-    let activeRoomId = "";
-    let emptySince = 0;
-    let startedRoomId = "";
+    const roomsById = new Map();
     let stopping = false;
-    let roomHadPlayers = false;
-    let completionInProgressRoomId = "";
-    let completionRetryAt = 0;
-    let completionFailures = 0;
     let assignmentPollPromise = null;
     let heartbeatPromise = null;
+
+    function createRoomRuntime(roomId) {
+        return {
+            id: roomId,
+            gameRoom: new GameRoom(roomId, config.maxPlayers),
+            sockets: new Map(),
+            emptySince: 0,
+            hadPlayers: false,
+            started: false,
+            starting: false,
+            completionInProgress: false,
+            completionRetryAt: 0,
+            completionFailures: 0
+        };
+    }
 
     async function apiRequest(path, body) {
         const response = await fetch(new URL(path, config.apiUrl), {
@@ -152,27 +160,28 @@ function createGateway(config) {
                 const result = await apiRequest(
                     `/api/server/assignment?id=${encodeURIComponent(config.serverId)}`
                 );
-                const nextRoomId = result.room ? String(result.room.id) : "";
-                if (nextRoomId === activeRoomId) {
-                    return;
+                const assignedRooms = Array.isArray(result.rooms)
+                    ? result.rooms
+                    : result.room
+                        ? [result.room]
+                        : [];
+                const assignedRoomIds = new Set();
+                for (const assignedRoom of assignedRooms) {
+                    if (!assignedRoom || assignedRoom.id == null)
+                        continue;
+                    const roomId = String(assignedRoom.id);
+                    assignedRoomIds.add(roomId);
+                    if (!roomsById.has(roomId)) {
+                        roomsById.set(roomId, createRoomRuntime(roomId));
+                        console.log(`Dedicated game room ${roomId} is ready.`);
+                    }
                 }
-                if (activeRoom && activeRoom.players.size > 0) {
-                    console.error(
-                        `Assignment changed while room ${activeRoomId} had connected players.`
-                    );
-                    return;
-                }
-                activeRoomId = nextRoomId;
-                activeRoom = nextRoomId
-                    ? new GameRoom(nextRoomId, config.maxPlayers)
-                    : null;
-                emptySince = 0;
-                startedRoomId = "";
-                roomHadPlayers = false;
-                completionRetryAt = 0;
-                completionFailures = 0;
-                if (activeRoom) {
-                    console.log(`Dedicated game room ${activeRoomId} is ready.`);
+                for (const [roomId, roomRuntime] of roomsById) {
+                    if (!assignedRoomIds.has(roomId) &&
+                        roomRuntime.gameRoom.players.size === 0 &&
+                        !roomRuntime.completionInProgress) {
+                        roomsById.delete(roomId);
+                    }
                 }
             })().finally(() => {
                 assignmentPollPromise = null;
@@ -188,93 +197,100 @@ function createGateway(config) {
         });
     }
 
-    async function startRoomIfReady(roomId) {
-        if (!activeRoom || activeRoomId !== roomId ||
-            activeRoom.players.size < 2 || startedRoomId === roomId) {
+    async function startRoomIfReady(roomRuntime) {
+        if (roomRuntime.gameRoom.players.size < 2 ||
+            roomRuntime.started || roomRuntime.starting) {
             return;
         }
-        await apiRequest(
-            `/api/server/rooms/${encodeURIComponent(roomId)}/start`,
-            { serverId: config.serverId }
-        );
-        if (activeRoomId === roomId && activeRoom?.players.size >= 2) {
-            startedRoomId = roomId;
+        roomRuntime.starting = true;
+        try {
+            await apiRequest(
+                `/api/server/rooms/${encodeURIComponent(roomRuntime.id)}/start`,
+                { serverId: config.serverId }
+            );
+            if (roomRuntime.gameRoom.players.size >= 2)
+                roomRuntime.started = true;
+        } finally {
+            roomRuntime.starting = false;
         }
     }
 
-    function broadcastState(state) {
-        for (const socket of socketsByUserId.values()) {
+    function broadcastState(roomRuntime, state) {
+        for (const socket of roomRuntime.sockets.values()) {
             sendJson(socket, state);
         }
     }
 
-    async function completeEmptyRoom(roomId) {
-        if (completionInProgressRoomId === roomId) {
+    async function completeEmptyRoom(roomRuntime) {
+        if (roomRuntime.completionInProgress) {
             return;
         }
-        completionInProgressRoomId = roomId;
+        roomRuntime.completionInProgress = true;
         try {
             await apiRequest(
-                `/api/server/rooms/${encodeURIComponent(roomId)}/complete`,
+                `/api/server/rooms/${encodeURIComponent(roomRuntime.id)}/complete`,
                 { serverId: config.serverId }
             );
-            if (activeRoomId === roomId &&
-                activeRoom &&
-                activeRoom.players.size === 0) {
-                activeRoom = null;
-                activeRoomId = "";
-                startedRoomId = "";
-                emptySince = 0;
-                roomHadPlayers = false;
-                completionRetryAt = 0;
-                completionFailures = 0;
-            }
+            if (roomRuntime.gameRoom.players.size === 0 &&
+                roomsById.get(roomRuntime.id) === roomRuntime)
+                roomsById.delete(roomRuntime.id);
         } finally {
-            completionInProgressRoomId = "";
+            roomRuntime.completionInProgress = false;
         }
     }
 
-    function closeRoomWhenEmpty(now) {
-        if (!activeRoom || activeRoom.players.size > 0) {
-            emptySince = 0;
+    function closeRoomWhenEmpty(roomRuntime, now) {
+        if (roomRuntime.gameRoom.players.size > 0) {
+            roomRuntime.emptySince = 0;
             return;
         }
-        if (!roomHadPlayers && !emptySince) {
-            emptySince = now;
+        if (!roomRuntime.hadPlayers && !roomRuntime.emptySince) {
+            roomRuntime.emptySince = now;
             return;
         }
-        if (!roomHadPlayers && now - emptySince < EMPTY_ROOM_GRACE_MS) {
+        if (!roomRuntime.hadPlayers &&
+            now - roomRuntime.emptySince < EMPTY_ROOM_GRACE_MS) {
             return;
         }
-        if (completionInProgressRoomId || now < completionRetryAt) {
+        if (roomRuntime.completionInProgress ||
+            now < roomRuntime.completionRetryAt) {
             return;
         }
-        const roomId = activeRoomId;
-        completeEmptyRoom(roomId).catch(error => {
-            completionFailures++;
-            completionRetryAt = Date.now() + Math.min(
+        completeEmptyRoom(roomRuntime).catch(error => {
+            roomRuntime.completionFailures++;
+            roomRuntime.completionRetryAt = Date.now() + Math.min(
                 30_000,
-                1_000 * (2 ** Math.min(completionFailures - 1, 5))
+                1_000 * (2 ** Math.min(
+                    roomRuntime.completionFailures - 1,
+                    5
+                ))
             );
-            console.error(`Could not complete empty room ${roomId}:`, error.message);
+            console.error(
+                `Could not complete empty room ${roomRuntime.id}:`,
+                error.message
+            );
         });
     }
 
     async function disconnectPlayer(socket, userId) {
-        if (!userId || socketsByUserId.get(userId) !== socket) {
+        const connection = socketsByUserId.get(userId);
+        if (!userId || !connection || connection.socket !== socket) {
             return;
         }
-        const roomId = activeRoomId;
         socketsByUserId.delete(userId);
-        activeRoom?.removePlayer(userId);
-        closeRoomWhenEmpty(Date.now());
+        const roomRuntime = roomsById.get(connection.roomId);
+        if (roomRuntime) {
+            roomRuntime.sockets.delete(userId);
+            roomRuntime.gameRoom.removePlayer(userId);
+            closeRoomWhenEmpty(roomRuntime, Date.now());
+        }
         sendJson(socket, { type: "disconnected" });
-        if (activeRoom) {
-            broadcastState(activeRoom.snapshot());
+        if (roomRuntime) {
+            broadcastState(roomRuntime, roomRuntime.gameRoom.snapshot());
         }
         try {
             await apiRequest(
-                `/api/server/rooms/${encodeURIComponent(roomId)}/leave`,
+                `/api/server/rooms/${encodeURIComponent(connection.roomId)}/leave`,
                 { serverId: config.serverId, userId }
             );
         } catch (error) {
@@ -306,6 +322,7 @@ function createGateway(config) {
 
     function handleConnection(socket) {
         let userId = "";
+        let roomId = "";
         let authenticating = false;
         let messageCount = 0;
         let messageWindowStart = Date.now();
@@ -351,22 +368,15 @@ function createGateway(config) {
                 authenticating = true;
                 clearTimeout(authenticationTimer);
                 try {
-                    await pollAssignment();
-                    if (!activeRoom) {
-                        socket.close(4003, "This server is not assigned to a room.");
-                        return;
-                    }
-                    if (completionInProgressRoomId === activeRoomId) {
-                        socket.close(4003, "This room is closing.");
-                        return;
-                    }
                     const ticket = await validateTicket(message.ticket);
+                    await pollAssignment();
+                    const ticketRoomId = String(ticket.roomId);
+                    const roomRuntime = roomsById.get(ticketRoomId);
                     if (socket.readyState !== WebSocket.OPEN ||
-                        completionInProgressRoomId === activeRoomId ||
-                        !activeRoom ||
-                        String(ticket.roomId) !== activeRoomId) {
+                        !roomRuntime ||
+                        roomRuntime.completionInProgress) {
                         await apiRequest(
-                            `/api/server/rooms/${encodeURIComponent(ticket.roomId)}/leave`,
+                            `/api/server/rooms/${encodeURIComponent(ticketRoomId)}/leave`,
                             {
                                 serverId: config.serverId,
                                 userId: String(ticket.userId)
@@ -375,36 +385,73 @@ function createGateway(config) {
                         if (socket.readyState === WebSocket.OPEN) {
                             socket.close(
                                 4003,
-                                "This server is no longer accepting players for that room."
+                                "This server is not accepting players for that room."
                             );
                         }
                         return;
                     }
                     if (socketsByUserId.has(ticket.userId)) {
-                        const previous = socketsByUserId.get(ticket.userId);
+                        const previous =
+                            socketsByUserId.get(ticket.userId);
                         socketsByUserId.delete(ticket.userId);
-                        activeRoom.removePlayer(ticket.userId);
-                        previous.close(4004, "This account connected elsewhere.");
+                        const previousRoom =
+                            roomsById.get(previous.roomId);
+                        previousRoom?.sockets.delete(
+                            String(ticket.userId)
+                        );
+                        previousRoom?.gameRoom.removePlayer(
+                            String(ticket.userId)
+                        );
+                        if (previousRoom) {
+                            closeRoomWhenEmpty(previousRoom, Date.now());
+                            broadcastState(
+                                previousRoom,
+                                previousRoom.gameRoom.snapshot()
+                            );
+                        }
+                        previous.socket.close(
+                            4004,
+                            "This account connected elsewhere."
+                        );
+                        if (previous.roomId !== ticketRoomId) {
+                            apiRequest(
+                                `/api/server/rooms/${encodeURIComponent(previous.roomId)}/leave`,
+                                {
+                                    serverId: config.serverId,
+                                    userId: String(ticket.userId)
+                                }
+                            ).catch(error => {
+                                console.error(
+                                    "Could not release replaced room member:",
+                                    error.message
+                                );
+                            });
+                        }
                     }
-                    activeRoom.addPlayer({
+                    roomRuntime.gameRoom.addPlayer({
                         userId: String(ticket.userId),
                         playerName: ticket.playerName,
                         team: ticket.team
                     });
-                    roomHadPlayers = true;
-                    emptySince = 0;
+                    roomRuntime.hadPlayers = true;
+                    roomRuntime.emptySince = 0;
                     userId = String(ticket.userId);
-                    socketsByUserId.set(userId, socket);
+                    roomId = ticketRoomId;
+                    roomRuntime.sockets.set(userId, socket);
+                    socketsByUserId.set(userId, { socket, roomId });
                     sendJson(socket, {
                         type: "authenticated",
-                        roomId: activeRoomId,
+                        roomId,
                         userId,
                         playerName: ticket.playerName,
                         team: ticket.team,
-                        snapshot: activeRoom.snapshot()
+                        snapshot: roomRuntime.gameRoom.snapshot()
                     });
-                    await startRoomIfReady(activeRoomId);
-                    broadcastState(activeRoom.snapshot());
+                    await startRoomIfReady(roomRuntime);
+                    broadcastState(
+                        roomRuntime,
+                        roomRuntime.gameRoom.snapshot()
+                    );
                 } catch (error) {
                     if (socket.readyState === WebSocket.OPEN) {
                         socket.close(4003, error.message);
@@ -413,8 +460,9 @@ function createGateway(config) {
                 return;
             }
 
-            if (!activeRoom || message.type !== "input" ||
-                !activeRoom.setInput(userId, message)) {
+            const roomRuntime = roomsById.get(roomId);
+            if (!roomRuntime || message.type !== "input" ||
+                !roomRuntime.gameRoom.setInput(userId, message)) {
                 socket.close(4002, "Invalid game input.");
             }
         });
@@ -431,9 +479,13 @@ function createGateway(config) {
     webSockets.on("connection", handleConnection);
 
     const tickTimer = setInterval(() => {
-        if (activeRoom) {
-            broadcastState(activeRoom.tick(TICK_RATE_MS / 1000));
-            closeRoomWhenEmpty(Date.now());
+        const now = Date.now();
+        for (const roomRuntime of roomsById.values()) {
+            broadcastState(
+                roomRuntime,
+                roomRuntime.gameRoom.tick(TICK_RATE_MS / 1000, now)
+            );
+            closeRoomWhenEmpty(roomRuntime, now);
         }
     }, TICK_RATE_MS);
     const assignmentTimer = setInterval(() => {
@@ -451,16 +503,21 @@ function createGateway(config) {
                     console.error("Dedicated-server heartbeat failed:", error.message);
                 })
         ];
-        if (activeRoom && activeRoom.players.size > 0) {
+        for (const roomRuntime of roomsById.values()) {
+            if (roomRuntime.gameRoom.players.size === 0)
+                continue;
             heartbeats.push(
                 apiRequest(
-                    `/api/server/rooms/${encodeURIComponent(activeRoomId)}/members/heartbeat`,
+                    `/api/server/rooms/${encodeURIComponent(roomRuntime.id)}/members/heartbeat`,
                     {
                         serverId: config.serverId,
-                        userIds: [...activeRoom.players.keys()]
+                        userIds: [...roomRuntime.gameRoom.players.keys()]
                     }
                 ).catch(error => {
-                    console.error("Room member heartbeat failed:", error.message);
+                    console.error(
+                        `Room ${roomRuntime.id} member heartbeat failed:`,
+                        error.message
+                    );
                 })
             );
         }
@@ -492,8 +549,11 @@ function createGateway(config) {
             clearInterval(tickTimer);
             clearInterval(assignmentTimer);
             clearInterval(heartbeatTimer);
-            for (const socket of socketsByUserId.values()) {
-                socket.close(1001, "Dedicated server shutting down.");
+            for (const connection of socketsByUserId.values()) {
+                connection.socket.close(
+                    1001,
+                    "Dedicated server shutting down."
+                );
             }
             await new Promise(resolve => {
                 webSockets.close(() => app.close(resolve));
