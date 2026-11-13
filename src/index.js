@@ -112,8 +112,11 @@ CREATE TABLE IF NOT EXISTS room_members (
     team SMALLINT NOT NULL CHECK (team IN (1, 2)),
     player_name TEXT NOT NULL,
     joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    connected BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (room_id, user_id)
 );
+ALTER TABLE room_members
+    ADD COLUMN IF NOT EXISTS connected BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE TABLE IF NOT EXISTS join_tickets (
     ticket_hash TEXT PRIMARY KEY,
     room_id BIGINT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
@@ -785,6 +788,7 @@ async function route(request, response) {
                  FROM rooms r
                  JOIN game_servers gs ON gs.id = r.server_id
                  LEFT JOIN room_members rm ON rm.room_id = r.id
+                    AND rm.connected = TRUE
                     AND rm.joined_at > NOW() - INTERVAL '45 seconds'
                  WHERE r.status IN ('waiting', 'playing')
                    AND gs.heartbeat_at > NOW() - INTERVAL '20 seconds'
@@ -897,6 +901,7 @@ async function route(request, response) {
                     const members = await client.query(
                         `SELECT COUNT(*)::INTEGER AS count FROM room_members
                          WHERE room_id = $1
+                           AND connected = TRUE
                            AND joined_at > NOW() - INTERVAL '45 seconds'`,
                         [current.id]
                     );
@@ -1196,7 +1201,9 @@ async function route(request, response) {
                     return null;
                 }
                 await client.query(
-                    "UPDATE room_members SET joined_at = NOW() WHERE room_id = $1 AND user_id = $2",
+                    `UPDATE room_members
+                     SET joined_at = NOW(), connected = TRUE
+                     WHERE room_id = $1 AND user_id = $2`,
                     [validated.room_id, validated.user_id]
                 );
                 return validated;
@@ -1266,13 +1273,37 @@ async function route(request, response) {
                 return;
             }
             await pool.query(
-                `UPDATE room_members rm SET joined_at = NOW()
+                `UPDATE room_members rm
+                 SET connected = rm.user_id = ANY($3::BIGINT[]),
+                     joined_at = CASE
+                         WHEN rm.user_id = ANY($3::BIGINT[]) THEN NOW()
+                         ELSE rm.joined_at
+                     END
                  FROM rooms r
                  WHERE rm.room_id = r.id AND r.id = $1
-                   AND r.server_id = $2 AND rm.user_id = ANY($3::BIGINT[])`,
+                   AND r.server_id = $2`,
                 [memberHeartbeatMatch[1], body.serverId, body.userIds]
             );
             respond(response, 200, { status: "ok" });
+            return;
+        }
+        const memberDisconnectMatch =
+            /^\/api\/server\/rooms\/(\d+)\/members\/disconnect$/.exec(path);
+        if (method === "POST" && memberDisconnectMatch) {
+            if (typeof body.serverId !== "string" ||
+                typeof body.userId !== "string" ||
+                !/^\d+$/.test(body.userId)) {
+                respond(response, 400, { error: "Invalid room member disconnect." });
+                return;
+            }
+            await pool.query(
+                `UPDATE room_members rm SET connected = FALSE
+                 FROM rooms r
+                 WHERE rm.room_id = r.id AND r.id = $1
+                   AND r.server_id = $2 AND rm.user_id = $3`,
+                [memberDisconnectMatch[1], body.serverId, body.userId]
+            );
+            respond(response, 200, { status: "disconnected" });
             return;
         }
         if (method === "POST" && leaveMatch) {

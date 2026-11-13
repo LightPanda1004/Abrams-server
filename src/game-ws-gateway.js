@@ -260,27 +260,27 @@ function createGateway(config) {
         }
     }
 
-    function closeRoomWhenEmpty(roomRuntime, now) {
+    function closeRoomWhenEmpty(roomRuntime, now, reasonOverride) {
         if (roomRuntime.gameRoom.players.size > 0) {
             roomRuntime.emptySince = 0;
-            return;
+            return Promise.resolve();
         }
         if (!roomRuntime.hadPlayers && !roomRuntime.emptySince) {
             roomRuntime.emptySince = now;
-            return;
+            return Promise.resolve();
         }
         if (!roomRuntime.hadPlayers &&
             now - roomRuntime.emptySince < EMPTY_ROOM_GRACE_MS) {
-            return;
+            return Promise.resolve();
         }
         if (roomRuntime.completionInProgress ||
             now < roomRuntime.completionRetryAt) {
-            return;
+            return Promise.resolve();
         }
-        const reason = roomRuntime.hadPlayers
+        const reason = reasonOverride || (roomRuntime.hadPlayers
             ? "reconnect_grace_expired_empty"
-            : "unclaimed_room_grace_expired";
-        completeEmptyRoom(roomRuntime, reason).catch(error => {
+            : "unclaimed_room_grace_expired");
+        return completeEmptyRoom(roomRuntime, reason).catch(error => {
             roomRuntime.completionFailures++;
             roomRuntime.completionRetryAt = Date.now() + Math.min(
                 30_000,
@@ -311,6 +311,18 @@ function createGateway(config) {
                 disconnectedAt + config.reconnectGraceMs
             );
             roomRuntime.gameRoom.setPlayerConnected(userId, false);
+            apiRequest(
+                `/api/server/rooms/${encodeURIComponent(roomRuntime.id)}/members/disconnect`,
+                { serverId: config.serverId, userId }
+            ).catch(error => {
+                console.error(JSON.stringify({
+                    event: "room_member_disconnect_failed",
+                    roomId: roomRuntime.id,
+                    userId,
+                    error: error.message,
+                    serverId: config.serverId
+                }));
+            });
             console.info(JSON.stringify({
                 event: "player_disconnected",
                 roomId: roomRuntime.id,
@@ -321,6 +333,44 @@ function createGateway(config) {
             broadcastState(roomRuntime, roomRuntime.gameRoom.snapshot());
         }
         sendJson(socket, { type: "disconnected" });
+    }
+
+    async function leavePlayer(socket, userId, roomId) {
+        const connection = socketsByUserId.get(userId);
+        if (!connection || connection.socket !== socket ||
+            connection.roomId !== roomId) {
+            return;
+        }
+
+        const leavingUserId = userId;
+        const leavingRoomId = roomId;
+        socketsByUserId.delete(userId);
+        const roomRuntime = roomsById.get(roomId);
+        if (roomRuntime) {
+            roomRuntime.sockets.delete(userId);
+            roomRuntime.disconnectedPlayers.delete(userId);
+            roomRuntime.gameRoom.removePlayer(userId);
+        }
+        userId = "";
+        roomId = "";
+
+        await apiRequest(
+            `/api/server/rooms/${encodeURIComponent(leavingRoomId)}/leave`,
+            { serverId: config.serverId, userId: leavingUserId }
+        );
+
+        if (roomRuntime) {
+            broadcastState(roomRuntime, roomRuntime.gameRoom.snapshot());
+            if (roomRuntime.gameRoom.players.size === 0)
+                await closeRoomWhenEmpty(
+                    roomRuntime,
+                    Date.now(),
+                    "explicit_leave_empty"
+                );
+        }
+
+        sendJson(socket, { type: "left" });
+        socket.close(1000, "Left room.");
     }
 
     function expireDisconnectedPlayers(roomRuntime, now) {
@@ -540,6 +590,20 @@ function createGateway(config) {
                 return;
             }
 
+            if (message.type === "leave") {
+                leavePlayer(socket, userId, roomId).catch(error => {
+                    console.error(JSON.stringify({
+                        event: "room_leave_failed",
+                        roomId,
+                        userId,
+                        error: error.message,
+                        serverId: config.serverId
+                    }));
+                    socket.close(1011, "Could not leave room.");
+                });
+                return;
+            }
+
             const roomRuntime = roomsById.get(roomId);
             if (!roomRuntime || message.type !== "input" ||
                 !roomRuntime.gameRoom.setInput(userId, message)) {
@@ -592,7 +656,7 @@ function createGateway(config) {
                     `/api/server/rooms/${encodeURIComponent(roomRuntime.id)}/members/heartbeat`,
                     {
                         serverId: config.serverId,
-                        userIds: [...roomRuntime.gameRoom.players.keys()]
+                        userIds: [...roomRuntime.sockets.keys()]
                     }
                 ).catch(error => {
                     console.error(

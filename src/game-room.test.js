@@ -628,6 +628,50 @@ test("one fire press creates one projectile until the button is released", () =>
     assert.equal(state.events.filter(event => event.type === "playerFired").length, 2);
 });
 
+test("projectile expiry does not create another shot while fire stays held", () => {
+    const room = new GameRoom("room-fire-expiry");
+    room.addPlayer(player(1));
+    const input = {
+        throttle: 0,
+        steering: 0,
+        fire: true
+    };
+
+    room.setInput("1", input, 10_000);
+    assert.equal(room.projectiles.length, 1);
+    for (let tick = 0; tick < 50; tick++) {
+        room.tick(0.1, 10_100 + tick * 100);
+    }
+
+    assert.equal(room.projectiles.length, 0);
+    assert.equal(room.setInput("1", input, 15_100), true);
+    assert.equal(room.projectiles.length, 0);
+
+    room.setInput("1", { ...input, fire: false }, 15_101);
+    room.setInput("1", input, 15_102);
+    assert.equal(room.projectiles.length, 1);
+    assert.equal(room.projectiles[0].id, 2);
+});
+
+test("server movement follows its heading without lateral drift", () => {
+    const room = new GameRoom("room-straight-movement");
+    room.addPlayer(player(1));
+    const tank = room.players.get("1");
+    const initialZ = tank.z;
+    room.setInput("1", {
+        throttle: 1,
+        steering: 0,
+        fire: false
+    }, 10_000);
+
+    for (let tick = 0; tick < 20; tick++)
+        room.tick(0.05, 10_050 + tick * 50);
+
+    assert.ok(tank.x > -24);
+    assert.equal(tank.z, initialZ);
+    assert.equal(tank.heading, 90);
+});
+
 test("a disconnected player and their projectiles are removed", () => {
     const room = new GameRoom("room-5");
     room.addPlayer(player(1));

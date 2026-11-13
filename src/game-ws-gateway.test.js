@@ -322,6 +322,7 @@ test(
                     const { ticket } = JSON.parse(
                         Buffer.concat(chunks).toString("utf8")
                     );
+
                     const first = ticket.startsWith("first");
                     respond(response, 200, {
                         roomId: first ? "42" : "43",
@@ -561,5 +562,156 @@ test(
         first.socket.close();
         await once(first.socket, "close");
         await Promise.all([firstRoomCompletion, bothMemberLeaves]);
+    }
+);
+
+test(
+    "explicit leave removes the player immediately and closes only the empty room",
+    { timeout: 10_000 },
+    async t => {
+        const leaveRequests = [];
+        const completionReasons = [];
+        let resolveRoomCompletion;
+        const roomCompletion = new Promise(resolve => {
+            resolveRoomCompletion = resolve;
+        });
+        const api = http.createServer((request, response) => {
+            if (request.url === "/api/server/register") {
+                request.resume();
+                respond(response, 200, {});
+                return;
+            }
+            if (request.url.startsWith("/api/server/assignment")) {
+                respond(response, 200, { rooms: [{ id: "42" }] });
+                return;
+            }
+            if (request.url === "/api/server/tickets/validate") {
+                const chunks = [];
+                request.on("data", chunk => chunks.push(chunk));
+                request.on("end", () => {
+                    const { ticket } = JSON.parse(
+                        Buffer.concat(chunks).toString("utf8")
+                    );
+                    const first = ticket.startsWith("first");
+                    respond(response, 200, {
+                        roomId: "42",
+                        userId: first ? "123" : "456",
+                        team: first ? 1 : 2,
+                        playerName: first ? "Pilot One" : "Pilot Two"
+                    });
+                });
+                return;
+            }
+            if (request.url.endsWith("/leave")) {
+                const chunks = [];
+                request.on("data", chunk => chunks.push(chunk));
+                request.on("end", () => {
+                    leaveRequests.push(
+                        JSON.parse(Buffer.concat(chunks).toString("utf8"))
+                    );
+                    respond(response, 200, { status: "left" });
+                });
+                return;
+            }
+            if (request.url.endsWith("/complete")) {
+                const chunks = [];
+                request.on("data", chunk => chunks.push(chunk));
+                request.on("end", () => {
+                    const payload = JSON.parse(
+                        Buffer.concat(chunks).toString("utf8")
+                    );
+                    completionReasons.push(payload.reason);
+                    respond(response, 200, {});
+                    resolveRoomCompletion();
+                });
+                return;
+            }
+            request.resume();
+            respond(response, 200, {});
+        });
+        api.listen(0, "127.0.0.1");
+        await once(api, "listening");
+        const apiAddress = api.address();
+
+        const gateway = createGateway({
+            apiUrl: new URL(`http://127.0.0.1:${apiAddress.port}`),
+            serverId: "explicit-leave-gateway",
+            publicWsUrl: "ws://127.0.0.1:7777/game",
+            port: 0,
+            maxPlayers: 32,
+            reconnectGraceMs: 30_000,
+            serverToken: "test-server-token-that-is-long-enough"
+        });
+        let gatewayStarted = false;
+        const clients = [];
+
+        t.after(async () => {
+            for (const client of clients) {
+                if (client.readyState === WebSocket.OPEN)
+                    client.close();
+            }
+            if (gatewayStarted)
+                await gateway.stop();
+            await new Promise(resolve => api.close(resolve));
+        });
+
+        await gateway.start();
+        gatewayStarted = true;
+        const url = `ws://127.0.0.1:${gateway.server.address().port}/game`;
+        const first = connectAndAuthenticate(
+            url,
+            "first-ticket-value-long-enough-123"
+        );
+        const second = connectAndAuthenticate(
+            url,
+            "second-ticket-value-long-enough-456"
+        );
+        clients.push(first.socket, second.socket);
+        await Promise.all([first.authenticated, second.authenticated]);
+
+        const secondSeesFirstLeave = new Promise((resolve, reject) => {
+            const timeout = setTimeout(
+                () => reject(new Error("Room did not update after player leave.")),
+                2000
+            );
+            const onMessage = raw => {
+                const message = JSON.parse(raw.toString("utf8"));
+                if (message.type !== "state" ||
+                    message.players?.length !== 1 ||
+                    message.players[0].userId !== "456")
+                    return;
+                clearTimeout(timeout);
+                second.socket.off("message", onMessage);
+                resolve();
+            };
+            second.socket.on("message", onMessage);
+        });
+        const firstLeft = new Promise(resolve => {
+            first.socket.on("message", raw => {
+                if (JSON.parse(raw.toString("utf8")).type === "left")
+                    resolve();
+            });
+        });
+        const firstClosed = once(first.socket, "close");
+        first.socket.send(JSON.stringify({ type: "leave" }));
+        await Promise.all([firstLeft, firstClosed, secondSeesFirstLeave]);
+        assert.deepEqual(leaveRequests.map(request => request.userId), ["123"]);
+        assert.deepEqual(completionReasons, []);
+        assert.equal(second.socket.readyState, WebSocket.OPEN);
+
+        const secondLeft = new Promise(resolve => {
+            second.socket.on("message", raw => {
+                if (JSON.parse(raw.toString("utf8")).type === "left")
+                    resolve();
+            });
+        });
+        const secondClosed = once(second.socket, "close");
+        second.socket.send(JSON.stringify({ type: "leave" }));
+        await Promise.all([secondLeft, secondClosed, roomCompletion]);
+        assert.deepEqual(
+            leaveRequests.map(request => request.userId),
+            ["123", "456"]
+        );
+        assert.deepEqual(completionReasons, ["explicit_leave_empty"]);
     }
 );
