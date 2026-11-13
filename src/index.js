@@ -208,8 +208,17 @@ function allowRequest(request, response) {
         return false;
     }
 
+    const path = new URL(request.url, "http://localhost").pathname;
+    if (path.startsWith("/api/server/") &&
+        hasValidServerToken(request)) {
+        return true;
+    }
+
     const now = Date.now();
-    const key = clientAddress(request);
+    const user = authenticatedUser(request);
+    const key = user && typeof user.sub === "string"
+        ? `user:${user.sub}`
+        : `ip:${clientAddress(request)}`;
     const previous = rateLimits.get(key);
     if (!previous || previous.resetAt <= now) {
         rateLimits.set(key, { count: 1, resetAt: now + 60_000 });
@@ -261,13 +270,18 @@ function authenticatedUser(request) {
 }
 
 function requireServer(request, response) {
-    const token = request.headers["x-server-token"];
-    if (typeof token !== "string" ||
-        !constantTimeEqual(token, serverApiToken)) {
+    if (!hasValidServerToken(request)) {
         respond(response, 401, { error: "Server authentication failed." });
         return false;
     }
     return true;
+}
+
+function hasValidServerToken(request) {
+    const token = request.headers["x-server-token"];
+    return typeof token === "string" &&
+        typeof serverApiToken === "string" &&
+        constantTimeEqual(token, serverApiToken);
 }
 
 function validUsername(value) {
@@ -463,6 +477,11 @@ async function getBlockchainContract() {
 
 async function issueTicket(client, roomId, userId, team, playerName) {
     const ticket = createTicket();
+    await client.query(
+        `DELETE FROM join_tickets
+         WHERE room_id = $1 AND user_id = $2 AND consumed_at IS NULL`,
+        [roomId, userId]
+    );
     await client.query(
         `INSERT INTO join_tickets
             (ticket_hash, room_id, user_id, team, player_name, expires_at)
@@ -883,16 +902,12 @@ async function route(request, response) {
                         [current.id]
                     );
                     const existing = await client.query(
-                        `SELECT joined_at > NOW() - INTERVAL '45 seconds' AS active
+                        `SELECT 1
                          FROM room_members WHERE room_id = $1 AND user_id = $2`,
                         [current.id, user.sub]
                     );
-                    if (existing.rows[0] && existing.rows[0].active) {
-                        const error = new Error("This account is already in that room.");
-                        error.status = 409;
-                        throw error;
-                    }
-                    if (members.rows[0].count >= current.max_players) {
+                    if (existing.rowCount === 0 &&
+                        members.rows[0].count >= current.max_players) {
                         const error = new Error("That room is full.");
                         error.status = 409;
                         throw error;

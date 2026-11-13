@@ -95,6 +95,8 @@ function createGateway(config) {
     let emptySince = 0;
     let startedRoomId = "";
     let stopping = false;
+    let assignmentPollPromise = null;
+    let heartbeatPromise = null;
 
     async function apiRequest(path, body) {
         const response = await fetch(new URL(path, config.apiUrl), {
@@ -137,32 +139,39 @@ function createGateway(config) {
         });
     }
 
-    async function pollAssignment() {
+    function pollAssignment() {
         if (stopping) {
-            return;
+            return Promise.resolve();
         }
-        const result = await apiRequest(
-            `/api/server/assignment?id=${encodeURIComponent(config.serverId)}`
-        );
-        const nextRoomId = result.room ? String(result.room.id) : "";
-        if (nextRoomId === activeRoomId) {
-            return;
+        if (!assignmentPollPromise) {
+            assignmentPollPromise = (async () => {
+                const result = await apiRequest(
+                    `/api/server/assignment?id=${encodeURIComponent(config.serverId)}`
+                );
+                const nextRoomId = result.room ? String(result.room.id) : "";
+                if (nextRoomId === activeRoomId) {
+                    return;
+                }
+                if (activeRoom && activeRoom.players.size > 0) {
+                    console.error(
+                        `Assignment changed while room ${activeRoomId} had connected players.`
+                    );
+                    return;
+                }
+                activeRoomId = nextRoomId;
+                activeRoom = nextRoomId
+                    ? new GameRoom(nextRoomId, config.maxPlayers)
+                    : null;
+                emptySince = 0;
+                startedRoomId = "";
+                if (activeRoom) {
+                    console.log(`Dedicated game room ${activeRoomId} is ready.`);
+                }
+            })().finally(() => {
+                assignmentPollPromise = null;
+            });
         }
-        if (activeRoom && activeRoom.players.size > 0) {
-            console.error(
-                `Assignment changed while room ${activeRoomId} had connected players.`
-            );
-            return;
-        }
-        activeRoomId = nextRoomId;
-        activeRoom = nextRoomId
-            ? new GameRoom(nextRoomId, config.maxPlayers)
-            : null;
-        emptySince = 0;
-        startedRoomId = "";
-        if (activeRoom) {
-            console.log(`Dedicated game room ${activeRoomId} is ready.`);
-        }
+        return assignmentPollPromise;
     }
 
     async function validateTicket(ticket) {
@@ -298,8 +307,12 @@ function createGateway(config) {
                 }
                 clearTimeout(authenticationTimer);
                 try {
-                    const ticket = await validateTicket(message.ticket);
                     await pollAssignment();
+                    if (!activeRoom) {
+                        socket.close(4003, "This server is not assigned to a room.");
+                        return;
+                    }
+                    const ticket = await validateTicket(message.ticket);
                     if (!activeRoom ||
                         String(ticket.roomId) !== activeRoomId) {
                         socket.close(4003, "This server is not assigned to that room.");
@@ -363,21 +376,31 @@ function createGateway(config) {
         });
     }, ASSIGNMENT_POLL_MS);
     const heartbeatTimer = setInterval(() => {
-        apiRequest("/api/server/heartbeat", { id: config.serverId })
-            .catch(error => {
-                console.error("Dedicated-server heartbeat failed:", error.message);
-            });
-        if (activeRoom && activeRoom.players.size > 0) {
-            apiRequest(
-                `/api/server/rooms/${encodeURIComponent(activeRoomId)}/members/heartbeat`,
-                {
-                    serverId: config.serverId,
-                    userIds: [...activeRoom.players.keys()]
-                }
-            ).catch(error => {
-                console.error("Room member heartbeat failed:", error.message);
-            });
+        if (heartbeatPromise) {
+            return;
         }
+        const heartbeats = [
+            apiRequest("/api/server/heartbeat", { id: config.serverId })
+                .catch(error => {
+                    console.error("Dedicated-server heartbeat failed:", error.message);
+                })
+        ];
+        if (activeRoom && activeRoom.players.size > 0) {
+            heartbeats.push(
+                apiRequest(
+                    `/api/server/rooms/${encodeURIComponent(activeRoomId)}/members/heartbeat`,
+                    {
+                        serverId: config.serverId,
+                        userIds: [...activeRoom.players.keys()]
+                    }
+                ).catch(error => {
+                    console.error("Room member heartbeat failed:", error.message);
+                })
+            );
+        }
+        heartbeatPromise = Promise.all(heartbeats).finally(() => {
+            heartbeatPromise = null;
+        });
     }, HEARTBEAT_MS);
 
     return {

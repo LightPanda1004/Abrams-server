@@ -58,6 +58,11 @@ with the API, polls for its room assignment, validates one-time player tickets,
 and sends authoritative snapshots at 20 Hz. A room supports up to 32 players.
 The gateway accepts browser WebSockets at `/game`; it authenticates each
 connection with the ticket sent as the first WebSocket message, not in the URL.
+Room creation reserves a gateway before the owner connects. Retrying a join
+from the same account reissues its ticket without consuming another player
+slot; only the newest unused ticket remains valid. An assigned room with no
+connected players is released after 30 seconds. Authenticated gateway
+coordination traffic is isolated from player request limits.
 
 Configure these values in the same `.env` used by the API. For local
 development:
