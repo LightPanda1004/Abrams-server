@@ -213,6 +213,7 @@ class GameRoom {
                 return false;
         }
 
+        let acceptDroneUpdate = true;
         if (input.droneActive === true && !player.droneDestroyed &&
             player.alive) {
             if (!player.droneActive) {
@@ -221,7 +222,7 @@ class GameRoom {
                     input.droneZ - player.z
                 ) > DRONE_SPAWN_RADIUS ||
                     input.droneY < 0 || input.droneY > 10) {
-                    return false;
+                    acceptDroneUpdate = false;
                 }
             } else {
                 const elapsedSeconds = Math.max(
@@ -236,17 +237,17 @@ class GameRoom {
                     input.droneY - player.droneY,
                     input.droneZ - player.droneZ
                 ) > allowedDistance) {
-                    return false;
+                    acceptDroneUpdate = false;
                 }
             }
 
-            if (input.droneFlying === true &&
+            if (acceptDroneUpdate && input.droneFlying === true &&
                 !player.droneFlying &&
                 input.droneY - (player.droneActive
                     ? player.droneLaunchY
                     : input.droneY) <
                     DRONE_DEPLOYMENT_HEIGHT - 0.1) {
-                return false;
+                acceptDroneUpdate = false;
             }
         }
 
@@ -266,7 +267,8 @@ class GameRoom {
         if (Number.isFinite(input.aimPitch)) {
             player.aimPitch = clamp(input.aimPitch, -20, 45);
         }
-        if (typeof input.droneActive === "boolean" &&
+        if (acceptDroneUpdate &&
+            typeof input.droneActive === "boolean" &&
             !player.droneDestroyed && player.alive) {
             if (input.droneActive) {
                 if (!player.droneActive) {

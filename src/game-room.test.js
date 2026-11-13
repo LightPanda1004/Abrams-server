@@ -322,12 +322,16 @@ test("server validates drone launch, flight state, and movement", () => {
     assert.equal(room.setInput("1", {
         ...baseInput,
         droneX: owner.x + 11
-    }, 10_000), false);
+    }, 10_000), true);
+    assert.equal(owner.droneActive, false);
     assert.equal(room.setInput("1", baseInput, 10_000), true);
     assert.equal(room.setInput("1", {
         ...baseInput,
+        throttle: 1,
         droneX: owner.x + 2
-    }, 10_050), false);
+    }, 10_050), true);
+    assert.equal(owner.droneX, owner.x);
+    assert.equal(owner.throttle, 1);
     assert.equal(room.setInput("1", {
         ...baseInput,
         droneX: owner.x + 0.4,
@@ -338,7 +342,8 @@ test("server validates drone launch, flight state, and movement", () => {
         droneX: owner.x + 0.4,
         droneY: 5.8,
         droneFlying: true
-    }, 11_700), false);
+    }, 11_700), true);
+    assert.equal(owner.droneFlying, false);
     assert.equal(room.setInput("1", {
         ...baseInput,
         droneX: owner.x + 0.4,

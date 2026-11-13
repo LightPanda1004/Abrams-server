@@ -202,6 +202,48 @@ test(
         clients.push(first.socket);
         assert.equal((await first.authenticated).type, "authenticated");
         assert.ok(assignmentPolls >= 2);
+        const afterRejectedDroneUpdate = new Promise((resolve, reject) => {
+            const timeout = setTimeout(
+                () => reject(new Error("Room stopped broadcasting after drone input.")),
+                2000
+            );
+            const onMessage = raw => {
+                const message = JSON.parse(raw.toString("utf8"));
+                if (message.type !== "state")
+                    return;
+                const player = message.players?.find(item =>
+                    item.userId === "123"
+                );
+                if (!player)
+                    return;
+                clearTimeout(timeout);
+                first.socket.off("message", onMessage);
+                resolve(player);
+            };
+            first.socket.once("close", (code, reason) => {
+                clearTimeout(timeout);
+                reject(new Error(
+                    `Drone update closed the room socket (${code}): ${reason}`
+                ));
+            });
+            first.socket.on("message", onMessage);
+        });
+        first.socket.send(JSON.stringify({
+            type: "input",
+            throttle: 0,
+            steering: 0,
+            fire: false,
+            droneActive: true,
+            droneFlying: false,
+            droneX: 1000,
+            droneY: 1,
+            droneZ: 0
+        }));
+        const stateAfterRejectedDroneUpdate =
+            await afterRejectedDroneUpdate;
+        assert.equal(stateAfterRejectedDroneUpdate.droneActive, false);
+        assert.equal(first.socket.readyState, WebSocket.OPEN);
+
         const firstPosition = first.authenticated.then(state => {
             const initialX = state.snapshot.players[0].x;
             const moved = new Promise((resolve, reject) => {
