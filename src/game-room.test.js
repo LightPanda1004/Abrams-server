@@ -84,7 +84,7 @@ test("movement follows tank acceleration and turns more slowly while reversing",
     assert.ok(Math.abs(reversed.heading - headingBeforeReverse - 4.5) < 0.001);
 });
 
-test("server-side projectiles damage only enemies and award a kill", () => {
+test("server-side projectiles damage 200-health enemies and award a kill", () => {
     const room = new GameRoom("room-4");
     room.addPlayer(player(1, 1));
     room.addPlayer(player(2, 2));
@@ -97,7 +97,7 @@ test("server-side projectiles damage only enemies and award a kill", () => {
     target.z = 0;
 
     let now = 10_000;
-    for (let shot = 0; shot < 4; shot++) {
+    for (let shot = 0; shot < 8; shot++) {
         room.setInput("1", {
             throttle: 0,
             steering: 0,
@@ -121,7 +121,49 @@ test("server-side projectiles damage only enemies and award a kill", () => {
 
     room.tick(0.05, target.respawnAt);
     assert.equal(target.alive, true);
+    assert.equal(target.health, 200);
+});
+
+test("tank collider prevents online tanks from passing through each other", () => {
+    const room = new GameRoom("room-tank-collision");
+    room.addPlayer(player(1, 1));
+    room.addPlayer(player(2, 2));
+    const left = room.players.get("1");
+    const right = room.players.get("2");
+    left.x = 0;
+    left.z = 0;
+    left.heading = 0;
+    right.x = 2;
+    right.z = 0;
+    right.heading = 0;
+
+    room.tick(0.05);
+
+    assert.ok(Math.abs(right.x - left.x) >= 2.41);
+});
+
+test("deployed drone colliding with a tank explodes and applies damage", () => {
+    const room = new GameRoom("room-drone-collision");
+    room.addPlayer(player(1, 1));
+    room.addPlayer(player(2, 2));
+    const owner = room.players.get("1");
+    const target = room.players.get("2");
+    owner.droneActive = true;
+    owner.droneX = target.x;
+    owner.droneY = 1;
+    owner.droneZ = target.z;
+
+    const state = room.tick(0.05, 20_000);
+
+    assert.equal(owner.droneActive, false);
+    assert.equal(owner.droneDestroyed, true);
     assert.equal(target.health, 100);
+    assert.ok(state.events.some(event =>
+        event.type === "droneCollision" &&
+        event.userId === target.userId &&
+        event.attackerId === owner.userId &&
+        event.health === 100
+    ));
 });
 
 test("one server projectile damages only one tank once", () => {
@@ -143,14 +185,45 @@ test("one server projectile damages only one tank once", () => {
         aimHeading: 90
     }, 10_000);
     const hitState = room.tick(0.05, 10_050);
-    assert.equal(target.health, 75);
+    assert.equal(target.health, 175);
     assert.equal(hitState.events.filter(event =>
         event.type === "playerHit"
     ).length, 1);
     assert.equal(hitState.projectiles.length, 0);
 
     room.tick(0.05, 10_100);
-    assert.equal(target.health, 75);
+    assert.equal(target.health, 175);
+});
+
+test("shell contact is resolved against tank collider bounds", () => {
+    const room = new GameRoom("room-tank-hitbox");
+    room.addPlayer(player(1, 1));
+    room.addPlayer(player(2, 2));
+    const shooter = room.players.get("1");
+    const target = room.players.get("2");
+    shooter.x = 0;
+    shooter.z = 0;
+    shooter.aimHeading = 90;
+    target.x = 12;
+    target.z = 0;
+    target.heading = -90;
+
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        aimHeading: 90
+    }, 10_000);
+    let event = null;
+    for (let tick = 0; tick < 5 && !event; tick++) {
+        const state = room.tick(0.05, 10_050 + tick * 50);
+        event = state.events.find(item => item.type === "playerHit");
+    }
+
+    assert.ok(event);
+    assert.equal(event.userId, target.userId);
+    assert.ok(Math.abs(event.x - (target.x - 3.8)) < 0.01);
+    assert.equal(target.health, 175);
 });
 
 test("networked shot starts at the tank fire point", () => {

@@ -2,6 +2,11 @@
 
 const ROOM_CAPACITY = 32;
 const MAX_WORLD_COORDINATE = 100;
+const TANK_HALF_WIDTH = 1.21;
+const TANK_HALF_LENGTH = 3.45;
+const TANK_COLLIDER_HEIGHT = 3.2;
+const DRONE_COLLISION_RADIUS = 1.2;
+const DRONE_COLLISION_DAMAGE = 100;
 const FORWARD_SPEED = 6;
 const REVERSE_SPEED = 3;
 const ACCELERATION = 2;
@@ -68,7 +73,7 @@ class GameRoom {
             droneX: 0,
             droneY: 0,
             droneZ: 0,
-            health: 100,
+            health: 200,
             kills: 0,
             deaths: 0,
             alive: true,
@@ -212,6 +217,8 @@ class GameRoom {
             );
         }
 
+        this.resolveTankCollisions();
+        this.resolveDroneCollisions(now);
         this.advanceProjectiles(delta, now);
         const events = this.pendingEvents;
         this.pendingEvents = [];
@@ -307,6 +314,11 @@ class GameRoom {
     advanceProjectiles(delta, now) {
         const remaining = [];
         for (const projectile of this.projectiles) {
+            const previousPosition = {
+                x: projectile.x,
+                y: projectile.y,
+                z: projectile.z
+            };
             const radians = projectile.heading * Math.PI / 180;
             const distance = PROJECTILE_SPEED * delta;
             projectile.x += Math.sin(radians) * distance;
@@ -315,11 +327,22 @@ class GameRoom {
                 distance;
             projectile.distance += distance;
 
-            const target = [...this.players.values()].find(player =>
-                player.alive &&
-                player.team !== projectile.team &&
-                squaredDistance(player, projectile) <= 2.5 * 2.5
-            );
+            let target = null;
+            let impact = null;
+            for (const player of this.players.values()) {
+                if (!player.alive || player.team === projectile.team)
+                    continue;
+                const contact = getTankSegmentContact(
+                    previousPosition,
+                    projectile,
+                    player
+                );
+                if (contact) {
+                    target = player;
+                    impact = contact;
+                    break;
+                }
+            }
             if (target) {
                 target.health = Math.max(0, target.health - PROJECTILE_DAMAGE);
                 this.pendingEvents.push({
@@ -327,26 +350,12 @@ class GameRoom {
                     userId: target.userId,
                     attackerId: projectile.ownerId,
                     health: target.health,
-                    x: round(projectile.x),
-                    y: round(projectile.y),
-                    z: round(projectile.z),
+                    x: round(impact.x),
+                    y: round(impact.y),
+                    z: round(impact.z),
                     projectileId: projectile.id
                 });
-                if (target.health === 0) {
-                    target.alive = false;
-                    target.droneActive = false;
-                    target.deaths++;
-                    target.respawnAt = now + RESPAWN_DELAY_MS;
-                    const attacker = this.players.get(projectile.ownerId);
-                    if (attacker) {
-                        attacker.kills++;
-                    }
-                    this.pendingEvents.push({
-                        type: "playerDestroyed",
-                        userId: target.userId,
-                        attackerId: attacker ? attacker.userId : ""
-                    });
-                }
+                this.handleTankDestroyed(target, projectile.ownerId, now);
                 continue;
             }
 
@@ -380,7 +389,7 @@ class GameRoom {
 
     respawn(player) {
         player.alive = true;
-        player.health = 100;
+        player.health = 200;
         player.throttle = 0;
         player.steering = 0;
         player.speed = 0;
@@ -395,12 +404,227 @@ class GameRoom {
             userId: player.userId
         });
     }
+
+    resolveTankCollisions() {
+        const players = [...this.players.values()].filter(player =>
+            player.alive
+        );
+        for (let pass = 0; pass < 2; pass++) {
+            for (let leftIndex = 0; leftIndex < players.length; leftIndex++) {
+                for (let rightIndex = leftIndex + 1;
+                    rightIndex < players.length;
+                    rightIndex++) {
+                    separateTankBodies(
+                        players[leftIndex],
+                        players[rightIndex]
+                    );
+                }
+            }
+        }
+    }
+
+    resolveDroneCollisions(now) {
+        for (const owner of this.players.values()) {
+            if (!owner.alive || !owner.droneActive ||
+                owner.droneDestroyed) {
+                continue;
+            }
+            const target = [...this.players.values()].find(player =>
+                player.alive &&
+                tankIntersectsDrone(player, owner)
+            );
+            if (!target)
+                continue;
+
+            owner.droneActive = false;
+            owner.droneDestroyed = true;
+            target.health = Math.max(
+                0,
+                target.health - DRONE_COLLISION_DAMAGE
+            );
+            this.pendingEvents.push({
+                type: "droneCollision",
+                userId: target.userId,
+                attackerId: owner.userId,
+                health: target.health,
+                x: round(owner.droneX),
+                y: round(owner.droneY),
+                z: round(owner.droneZ)
+            });
+            this.handleTankDestroyed(target, owner.userId, now);
+        }
+    }
+
+    handleTankDestroyed(target, attackerId, now) {
+        if (target.health > 0 || !target.alive)
+            return;
+
+        target.alive = false;
+        target.droneActive = false;
+        target.deaths++;
+        target.respawnAt = now + RESPAWN_DELAY_MS;
+        const attacker = this.players.get(attackerId);
+        if (attacker)
+            attacker.kills++;
+        this.pendingEvents.push({
+            type: "playerDestroyed",
+            userId: target.userId,
+            attackerId: attacker ? attacker.userId : ""
+        });
+    }
 }
 
-function squaredDistance(left, right) {
-    const dx = left.x - right.x;
-    const dz = left.z - right.z;
-    return dx * dx + dz * dz;
+function tankAxes(tank) {
+    const radians = tank.heading * Math.PI / 180;
+    return {
+        forward: { x: Math.sin(radians), z: Math.cos(radians) },
+        right: { x: Math.cos(radians), z: -Math.sin(radians) }
+    };
+}
+
+function dot2(left, right) {
+    return left.x * right.x + left.z * right.z;
+}
+
+function tankProjectionRadius(tank, axis) {
+    const axes = tankAxes(tank);
+    return TANK_HALF_LENGTH * Math.abs(dot2(axes.forward, axis)) +
+        TANK_HALF_WIDTH * Math.abs(dot2(axes.right, axis));
+}
+
+function separateTankBodies(left, right) {
+    const delta = { x: right.x - left.x, z: right.z - left.z };
+    const leftAxes = tankAxes(left);
+    const rightAxes = tankAxes(right);
+    const axes = [
+        leftAxes.forward,
+        leftAxes.right,
+        rightAxes.forward,
+        rightAxes.right
+    ];
+    let minimumOverlap = Number.POSITIVE_INFINITY;
+    let separationAxis = null;
+    for (const axis of axes) {
+        const overlap = tankProjectionRadius(left, axis) +
+            tankProjectionRadius(right, axis) -
+            Math.abs(dot2(delta, axis));
+        if (overlap <= 0)
+            return;
+        if (overlap < minimumOverlap) {
+            minimumOverlap = overlap;
+            separationAxis = axis;
+        }
+    }
+
+    const direction = dot2(delta, separationAxis) >= 0 ? 1 : -1;
+    const offset = minimumOverlap * 0.5 + 0.001;
+    left.x = clamp(
+        left.x - separationAxis.x * direction * offset,
+        -MAX_WORLD_COORDINATE,
+        MAX_WORLD_COORDINATE
+    );
+    left.z = clamp(
+        left.z - separationAxis.z * direction * offset,
+        -MAX_WORLD_COORDINATE,
+        MAX_WORLD_COORDINATE
+    );
+    right.x = clamp(
+        right.x + separationAxis.x * direction * offset,
+        -MAX_WORLD_COORDINATE,
+        MAX_WORLD_COORDINATE
+    );
+    right.z = clamp(
+        right.z + separationAxis.z * direction * offset,
+        -MAX_WORLD_COORDINATE,
+        MAX_WORLD_COORDINATE
+    );
+    left.speed = 0;
+    right.speed = 0;
+}
+
+function getTankSegmentContact(start, end, tank) {
+    const axes = tankAxes(tank);
+    const startDelta = {
+        x: start.x - tank.x,
+        z: start.z - tank.z
+    };
+    const endDelta = {
+        x: end.x - tank.x,
+        z: end.z - tank.z
+    };
+    const startLocal = [
+        dot2(startDelta, axes.forward),
+        dot2(startDelta, axes.right),
+        start.y
+    ];
+    const endLocal = [
+        dot2(endDelta, axes.forward),
+        dot2(endDelta, axes.right),
+        end.y
+    ];
+    const minimum = [
+        -TANK_HALF_LENGTH - 0.35,
+        -TANK_HALF_WIDTH - 0.35,
+        -0.25
+    ];
+    const maximum = [
+        TANK_HALF_LENGTH + 0.35,
+        TANK_HALF_WIDTH + 0.35,
+        TANK_COLLIDER_HEIGHT + 0.25
+    ];
+    let entry = 0;
+    let exit = 1;
+    for (let axis = 0; axis < startLocal.length; axis++) {
+        const direction = endLocal[axis] - startLocal[axis];
+        if (Math.abs(direction) < 0.000001) {
+            if (startLocal[axis] < minimum[axis] ||
+                startLocal[axis] > maximum[axis]) {
+                return null;
+            }
+            continue;
+        }
+        let near = (minimum[axis] - startLocal[axis]) / direction;
+        let far = (maximum[axis] - startLocal[axis]) / direction;
+        if (near > far)
+            [near, far] = [far, near];
+        entry = Math.max(entry, near);
+        exit = Math.min(exit, far);
+        if (entry > exit)
+            return null;
+    }
+
+    const fraction = clamp(entry, 0, 1);
+    return {
+        x: start.x + (end.x - start.x) * fraction,
+        y: start.y + (end.y - start.y) * fraction,
+        z: start.z + (end.z - start.z) * fraction
+    };
+}
+
+function tankIntersectsDrone(tank, droneOwner) {
+    const axes = tankAxes(tank);
+    const delta = {
+        x: droneOwner.droneX - tank.x,
+        z: droneOwner.droneZ - tank.z
+    };
+    const localForward = dot2(delta, axes.forward);
+    const localRight = dot2(delta, axes.right);
+    const closestForward = clamp(
+        localForward,
+        -TANK_HALF_LENGTH,
+        TANK_HALF_LENGTH
+    );
+    const closestRight = clamp(
+        localRight,
+        -TANK_HALF_WIDTH,
+        TANK_HALF_WIDTH
+    );
+    const closestY = clamp(droneOwner.droneY, 0, TANK_COLLIDER_HEIGHT);
+    const dx = localForward - closestForward;
+    const dz = localRight - closestRight;
+    const dy = droneOwner.droneY - closestY;
+    return dx * dx + dy * dy + dz * dz <=
+        DRONE_COLLISION_RADIUS * DRONE_COLLISION_RADIUS;
 }
 
 function squaredDroneDistance(player, projectile) {
