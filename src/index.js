@@ -812,9 +812,10 @@ async function route(request, response) {
                     const serverResult = await client.query(
                         `SELECT id, host, port, max_players, ws_url
                          FROM game_servers
-                         WHERE status = 'ready'
+                         WHERE status IN ('ready', 'busy')
                            AND heartbeat_at > NOW() - INTERVAL '20 seconds'
-                         ORDER BY heartbeat_at DESC
+                         ORDER BY CASE WHEN status = 'ready' THEN 0 ELSE 1 END,
+                                  heartbeat_at DESC
                          LIMIT 1
                          FOR UPDATE`
                     );
@@ -968,16 +969,6 @@ async function route(request, response) {
                 return;
             }
             await withTransaction(async client => {
-                await client.query(
-                    `DELETE FROM room_members rm USING rooms r
-                     WHERE rm.room_id = r.id AND r.server_id = $1
-                       AND r.status IN ('waiting', 'playing')`,
-                    [id]
-                );
-                await client.query(
-                    "UPDATE rooms SET status = 'complete' WHERE server_id = $1 AND status IN ('waiting', 'playing')",
-                    [id]
-                );
                 await client.query(
                     `INSERT INTO game_servers
                         (id, host, port, max_players, ws_url, status, current_room_id)

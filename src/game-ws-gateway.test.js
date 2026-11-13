@@ -313,3 +313,161 @@ test(
         assert.deepEqual([...completedRooms].sort(), ["42", "43"]);
     }
 );
+
+test(
+    "creating another room keeps the first active room joinable",
+    { timeout: 10_000 },
+    async t => {
+        let exposeSecondRoom = false;
+        const completedRooms = new Set();
+        let memberLeaves = 0;
+        let resolveBothMemberLeaves;
+        const bothMemberLeaves = new Promise(resolve => {
+            resolveBothMemberLeaves = resolve;
+        });
+        let resolveFirstRoomCompletion;
+        const firstRoomCompletion = new Promise(resolve => {
+            resolveFirstRoomCompletion = resolve;
+        });
+        let resolveSecondRoomCompletion;
+        const secondRoomCompletion = new Promise(resolve => {
+            resolveSecondRoomCompletion = resolve;
+        });
+        const api = http.createServer((request, response) => {
+            if (request.url === "/api/server/register") {
+                request.resume();
+                respond(response, 200, {});
+                return;
+            }
+            if (request.url.startsWith("/api/server/assignment")) {
+                respond(response, 200, {
+                    rooms: exposeSecondRoom
+                        ? [{ id: "42" }, { id: "43" }]
+                        : [{ id: "42" }]
+                });
+                return;
+            }
+            if (request.url === "/api/server/tickets/validate") {
+                const chunks = [];
+                request.on("data", chunk => chunks.push(chunk));
+                request.on("end", () => {
+                    const { ticket } = JSON.parse(
+                        Buffer.concat(chunks).toString("utf8")
+                    );
+                    const second = ticket.startsWith("second");
+                    respond(response, 200, {
+                        roomId: second ? "43" : "42",
+                        userId: second ? "456" : "123",
+                        team: second ? 2 : 1,
+                        playerName: second ? "Pilot Two" : "Pilot One"
+                    });
+                });
+                return;
+            }
+            if (request.url.endsWith("/complete")) {
+                const roomId = request.url.split("/")[4];
+                completedRooms.add(roomId);
+                respond(response, 200, {});
+                if (roomId === "42")
+                    resolveFirstRoomCompletion();
+                if (roomId === "43")
+                    resolveSecondRoomCompletion();
+                return;
+            }
+            if (request.url.endsWith("/leave")) {
+                request.resume();
+                respond(response, 200, {});
+                memberLeaves++;
+                if (memberLeaves === 2)
+                    resolveBothMemberLeaves();
+                return;
+            }
+            request.resume();
+            respond(response, 200, {});
+        });
+        api.listen(0, "127.0.0.1");
+        await once(api, "listening");
+        const apiAddress = api.address();
+
+        const gateway = createGateway({
+            apiUrl: new URL(`http://127.0.0.1:${apiAddress.port}`),
+            serverId: "room-persistence-gateway",
+            publicWsUrl: "ws://127.0.0.1:7777/game",
+            port: 0,
+            maxPlayers: 32,
+            serverToken: "test-server-token-that-is-long-enough"
+        });
+        let gatewayStarted = false;
+        const clients = [];
+
+        t.after(async () => {
+            for (const client of clients) {
+                if (client.readyState === WebSocket.OPEN)
+                    client.close();
+            }
+            if (gatewayStarted)
+                await gateway.stop();
+            await new Promise(resolve => api.close(resolve));
+        });
+
+        await gateway.start();
+        gatewayStarted = true;
+        const url = `ws://127.0.0.1:${gateway.server.address().port}/game`;
+        const first = connectAndAuthenticate(
+            url,
+            "first-ticket-value-long-enough-123"
+        );
+        clients.push(first.socket);
+        const firstState = await first.authenticated;
+        assert.equal(firstState.roomId, "42");
+
+        exposeSecondRoom = true;
+        const second = connectAndAuthenticate(
+            url,
+            "second-ticket-value-long-enough-123"
+        );
+        clients.push(second.socket);
+        const secondState = await second.authenticated;
+        assert.equal(secondState.roomId, "43");
+
+        const firstRoomState = new Promise((resolve, reject) => {
+            const timeout = setTimeout(
+                () => reject(new Error("First room stopped receiving updates.")),
+                2000
+            );
+            const onMessage = raw => {
+                const message = JSON.parse(raw.toString("utf8"));
+                if (message.type !== "state" ||
+                    !message.players?.some(player =>
+                        player.userId === "123" && player.x !==
+                            firstState.snapshot.players[0].x
+                    )) {
+                    return;
+                }
+                clearTimeout(timeout);
+                first.socket.off("message", onMessage);
+                resolve(message);
+            };
+            first.socket.on("message", onMessage);
+        });
+        first.socket.send(JSON.stringify({
+            type: "input",
+            throttle: 1,
+            steering: 0,
+            fire: false
+        }));
+        const updatedFirstRoom = await firstRoomState;
+        assert.equal(updatedFirstRoom.roomId, "42");
+        assert.equal(secondState.roomId, "43");
+
+        second.socket.close();
+        await once(second.socket, "close");
+        await secondRoomCompletion;
+        assert.ok(completedRooms.has("43"));
+        assert.equal(completedRooms.has("42"), false);
+
+        first.socket.close();
+        await once(first.socket, "close");
+        await Promise.all([firstRoomCompletion, bothMemberLeaves]);
+    }
+);
