@@ -120,7 +120,7 @@ test("online shell speed and reload match the Abrams single-player settings", ()
     assert.ok(Math.abs(state.projectiles[0].x + 13.5) < 0.001);
 });
 
-test("online shell follows the reported muzzle position and direction", () => {
+test("online shell follows the reported muzzle position and straight-line velocity", () => {
     const room = new GameRoom("room-muzzle-direction");
     room.addPlayer(player(1));
     const shooter = room.players.get("1");
@@ -147,13 +147,22 @@ test("online shell follows the reported muzzle position and direction", () => {
 
     assert.ok(Math.abs(projectile.heading - 30) < 0.001);
     assert.ok(Math.abs(projectile.pitch + 10) < 0.001);
+    const distance = 160 * 0.05;
     assert.ok(Math.abs(
         projectile.x -
         (shooter.x + Math.sin(muzzleHeading) *
-            Math.cos(muzzlePitch) * 8)
-    ) < 0.001);
-    assert.ok(projectile.z > shooter.z + 4.89);
-    assert.ok(projectile.y > 2.5);
+            Math.cos(muzzlePitch) * distance)
+    ) < 0.011);
+    assert.ok(Math.abs(
+        projectile.y -
+        (2.5 - Math.sin(muzzlePitch) * distance)
+    ) < 0.011);
+    assert.ok(Math.abs(
+        projectile.z -
+        (shooter.z + 4.89 +
+            Math.cos(muzzleHeading) *
+            Math.cos(muzzlePitch) * distance)
+    ) < 0.011);
 });
 
 test("server rejects invalid muzzle data", () => {
@@ -380,6 +389,34 @@ test("one server projectile damages only one tank once", () => {
 
     room.tick(0.05, 10_100);
     assert.equal(target.health, 175);
+});
+
+test("a projectile detonates on a teammate without applying damage", () => {
+    const room = new GameRoom("room-friendly-projectile-impact");
+    room.addPlayer(player(1, 1));
+    room.addPlayer(player(2, 1));
+    const shooter = room.players.get("1");
+    const teammate = room.players.get("2");
+    shooter.x = 0;
+    shooter.z = 0;
+    shooter.aimHeading = 90;
+    teammate.x = 10;
+    teammate.z = 0;
+
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        aimHeading: 90
+    }, 10_000);
+    const state = room.tick(0.05, 10_050);
+
+    assert.equal(teammate.health, 200);
+    assert.equal(state.projectiles.length, 0);
+    assert.equal(state.events.filter(event =>
+        event.type === "projectileImpact" &&
+        event.projectileId === 1
+    ).length, 1);
 });
 
 test("shell contact is resolved against tank collider bounds", () => {

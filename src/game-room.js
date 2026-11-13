@@ -450,20 +450,29 @@ class GameRoom {
     createProjectile(player, now, input = {}) {
         let heading = player.aimHeading;
         let pitch = player.aimPitch;
+        let directionX;
+        let directionY;
+        let directionZ;
         if (input.hasFireDirection === true) {
             const magnitude = Math.hypot(
                 input.fireDirectionX,
                 input.fireDirectionY,
                 input.fireDirectionZ
             );
-            const directionX = input.fireDirectionX / magnitude;
-            const directionY = input.fireDirectionY / magnitude;
-            const directionZ = input.fireDirectionZ / magnitude;
+            directionX = input.fireDirectionX / magnitude;
+            directionY = input.fireDirectionY / magnitude;
+            directionZ = input.fireDirectionZ / magnitude;
             heading = Math.atan2(directionX, directionZ) * 180 / Math.PI;
             pitch = Math.atan2(
                 -directionY,
                 Math.hypot(directionX, directionZ)
             ) * 180 / Math.PI;
+        } else {
+            const headingRadians = heading * Math.PI / 180;
+            const pitchRadians = pitch * Math.PI / 180;
+            directionX = Math.sin(headingRadians) * Math.cos(pitchRadians);
+            directionY = -Math.sin(pitchRadians);
+            directionZ = Math.cos(headingRadians) * Math.cos(pitchRadians);
         }
         const radians = player.aimHeading * Math.PI / 180;
         return {
@@ -480,6 +489,9 @@ class GameRoom {
                 : player.z + Math.cos(radians) * 2.5,
             heading,
             pitch,
+            directionX,
+            directionY,
+            directionZ,
             y: input.hasFireOrigin === true
                 ? clamp(input.fireOriginY, -10, 50)
                 : 1.5,
@@ -496,19 +508,32 @@ class GameRoom {
                 y: projectile.y,
                 z: projectile.z
             };
-            const radians = projectile.heading * Math.PI / 180;
             const distance = PROJECTILE_SPEED * delta;
-            const pitchRadians = projectile.pitch * Math.PI / 180;
-            const horizontalDistance = Math.cos(pitchRadians) * distance;
-            projectile.x += Math.sin(radians) * horizontalDistance;
-            projectile.z += Math.cos(radians) * horizontalDistance;
-            projectile.y -= Math.sin(pitchRadians) * distance;
+            projectile.x += projectile.directionX * distance;
+            projectile.y += projectile.directionY * distance;
+            projectile.z += projectile.directionZ * distance;
             projectile.distance += distance;
 
             let target = null;
             let impact = null;
+            let targetFraction = Infinity;
+            const segmentX = projectile.x - previousPosition.x;
+            const segmentY = projectile.y - previousPosition.y;
+            const segmentZ = projectile.z - previousPosition.z;
+            const segmentLengthSquared =
+                segmentX * segmentX +
+                segmentY * segmentY +
+                segmentZ * segmentZ;
+            const getSegmentFraction = contact =>
+                segmentLengthSquared > 0
+                    ? ((contact.x - previousPosition.x) * segmentX +
+                        (contact.y - previousPosition.y) * segmentY +
+                        (contact.z - previousPosition.z) * segmentZ) /
+                        segmentLengthSquared
+                    : 0;
+            let droneTarget = null;
             for (const player of this.players.values()) {
-                if (!player.alive || player.team === projectile.team)
+                if (!player.alive || player.userId === projectile.ownerId)
                     continue;
                 const contact = getTankSegmentContact(
                     previousPosition,
@@ -516,29 +541,15 @@ class GameRoom {
                     player
                 );
                 if (contact) {
-                    target = player;
-                    impact = contact;
-                    break;
+                    const fraction = getSegmentFraction(contact);
+                    if (fraction < targetFraction) {
+                        target = player;
+                        droneTarget = null;
+                        impact = contact;
+                        targetFraction = fraction;
+                    }
                 }
             }
-            if (target) {
-                target.health = Math.max(0, target.health - PROJECTILE_DAMAGE);
-                this.pendingEvents.push({
-                    type: "playerHit",
-                    userId: target.userId,
-                    attackerId: projectile.ownerId,
-                    health: target.health,
-                    x: round(impact.x),
-                    y: round(impact.y),
-                    z: round(impact.z),
-                    projectileId: projectile.id
-                });
-                this.handleTankDestroyed(target, projectile.ownerId);
-                continue;
-            }
-
-            let droneTarget = null;
-            let droneImpact = null;
             for (const player of this.players.values()) {
                 if (!player.droneActive || !player.droneFlying ||
                     player.droneDestroyed ||
@@ -556,10 +567,44 @@ class GameRoom {
                     2.5
                 );
                 if (contact) {
-                    droneTarget = player;
-                    droneImpact = contact;
-                    break;
+                    const fraction = getSegmentFraction(contact);
+                    if (fraction < targetFraction) {
+                        target = null;
+                        droneTarget = player;
+                        impact = contact;
+                        targetFraction = fraction;
+                    }
                 }
+            }
+            if (target) {
+                if (target.team === projectile.team) {
+                    this.pendingEvents.push({
+                        type: "projectileImpact",
+                        userId: target.userId,
+                        attackerId: projectile.ownerId,
+                        x: round(impact.x),
+                        y: round(impact.y),
+                        z: round(impact.z),
+                        projectileId: projectile.id
+                    });
+                } else {
+                    target.health = Math.max(
+                        0,
+                        target.health - PROJECTILE_DAMAGE
+                    );
+                    this.pendingEvents.push({
+                        type: "playerHit",
+                        userId: target.userId,
+                        attackerId: projectile.ownerId,
+                        health: target.health,
+                        x: round(impact.x),
+                        y: round(impact.y),
+                        z: round(impact.z),
+                        projectileId: projectile.id
+                    });
+                    this.handleTankDestroyed(target, projectile.ownerId);
+                }
+                continue;
             }
             if (droneTarget) {
                 droneTarget.droneActive = false;
@@ -569,9 +614,9 @@ class GameRoom {
                     type: "droneHit",
                     userId: droneTarget.userId,
                     attackerId: projectile.ownerId,
-                    x: round(droneImpact.x),
-                    y: round(droneImpact.y),
-                    z: round(droneImpact.z),
+                    x: round(impact.x),
+                    y: round(impact.y),
+                    z: round(impact.z),
                     projectileId: projectile.id
                 });
                 continue;
