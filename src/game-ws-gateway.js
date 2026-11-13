@@ -399,10 +399,13 @@ function createGateway(config) {
                         previousRoom?.sockets.delete(
                             String(ticket.userId)
                         );
-                        previousRoom?.gameRoom.removePlayer(
-                            String(ticket.userId)
-                        );
-                        if (previousRoom) {
+                        if (previous.roomId !== ticketRoomId) {
+                            previousRoom?.gameRoom.removePlayer(
+                                String(ticket.userId)
+                            );
+                        }
+                        if (previousRoom &&
+                            previous.roomId !== ticketRoomId) {
                             closeRoomWhenEmpty(previousRoom, Date.now());
                             broadcastState(
                                 previousRoom,
@@ -428,11 +431,21 @@ function createGateway(config) {
                             });
                         }
                     }
-                    roomRuntime.gameRoom.addPlayer({
-                        userId: String(ticket.userId),
-                        playerName: ticket.playerName,
-                        team: ticket.team
-                    });
+                    if (!roomRuntime.gameRoom.players.has(
+                        String(ticket.userId)
+                    )) {
+                        roomRuntime.gameRoom.addPlayer({
+                            userId: String(ticket.userId),
+                            playerName: ticket.playerName,
+                            team: ticket.team
+                        });
+                    } else if (roomRuntime.gameRoom.players.get(
+                        String(ticket.userId)
+                    ).team !== ticket.team) {
+                        throw new Error(
+                            "The room ticket team does not match the player."
+                        );
+                    }
                     roomRuntime.hadPlayers = true;
                     roomRuntime.emptySince = 0;
                     userId = String(ticket.userId);

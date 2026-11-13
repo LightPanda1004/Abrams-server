@@ -219,10 +219,12 @@ test("server-side projectiles damage 200-health enemies and award a kill", () =>
     assert.equal(target.alive, false);
     assert.equal(shooter.kills, 1);
     assert.equal(target.deaths, 1);
+    assert.equal(room.snapshot().matchEnded, true);
+    assert.equal(room.snapshot().winningTeam, shooter.team);
 
-    room.tick(0.05, target.respawnAt);
-    assert.equal(target.alive, true);
-    assert.equal(target.health, 200);
+    room.tick(0.05, Number.MAX_SAFE_INTEGER);
+    assert.equal(target.alive, false);
+    assert.equal(target.health, 0);
 });
 
 test("tank collider prevents online tanks from passing through each other", () => {
@@ -268,114 +270,82 @@ test("deployed drone colliding with a tank explodes and applies damage", () => {
     ));
 });
 
-test("drone in launch phase ignores owner and friendly tanks", () => {
-    const room = new GameRoom("room-drone-launch-phase");
+test("drone launch and owner or teammate contact cannot cause damage", () => {
+    const room = new GameRoom("room-drone-owner-team");
     room.addPlayer(player(1, 1));
     room.addPlayer(player(2, 1));
+    room.addPlayer(player(3, 2));
     const owner = room.players.get("1");
     const teammate = room.players.get("2");
+    const enemy = room.players.get("3");
+    owner.x = 0;
+    owner.z = 0;
+    teammate.x = 0;
+    teammate.z = 0;
+    enemy.x = 80;
+    enemy.z = 80;
     owner.droneActive = true;
-    owner.droneFlying = false;
-    owner.droneX = owner.x;
+    owner.droneX = 0;
     owner.droneY = 1;
-    owner.droneZ = owner.z;
-    teammate.x = owner.x;
-    teammate.z = owner.z;
+    owner.droneZ = 0;
 
-    const launchState = room.tick(0.05, 20_000);
-
+    room.tick(0.05, 20_000);
     assert.equal(owner.droneActive, true);
-    assert.equal(owner.droneFlying, false);
     assert.equal(owner.droneDestroyed, false);
+    assert.equal(owner.health, 200);
     assert.equal(teammate.health, 200);
-    assert.equal(launchState.events.some(event =>
-        event.type === "droneCollision"
-    ), false);
+    assert.equal(enemy.health, 200);
 
     owner.droneFlying = true;
-    const flightState = room.tick(0.05, 20_050);
+    room.tick(0.05, 20_050);
     assert.equal(owner.droneActive, true);
-    assert.equal(owner.droneFlying, true);
     assert.equal(owner.droneDestroyed, false);
+    assert.equal(owner.health, 200);
     assert.equal(teammate.health, 200);
-    assert.equal(flightState.events.some(event =>
-        event.type === "droneCollision"
-    ), false);
+    assert.equal(enemy.health, 200);
 });
 
-test("server does not resolve a drone collision during deployment", () => {
-    const room = new GameRoom("room-drone-deploying");
+test("server validates drone launch, flight state, and movement", () => {
+    const room = new GameRoom("room-drone-validation");
     room.addPlayer(player(1, 1));
-    room.addPlayer(player(2, 2));
     const owner = room.players.get("1");
-    const enemy = room.players.get("2");
-    const droneInput = {
+    const baseInput = {
         throttle: 0,
         steering: 0,
         fire: false,
         droneActive: true,
-        droneFlying: false,
-        droneX: enemy.x,
+        droneX: owner.x,
         droneY: 1,
-        droneZ: enemy.z
+        droneZ: owner.z
     };
-    assert.equal(room.setInput("1", droneInput), true);
-
-    const launchState = room.tick(0.05, 20_000);
-    assert.equal(owner.droneActive, true);
-    assert.equal(owner.droneFlying, false);
-    assert.equal(owner.droneDestroyed, false);
-    assert.equal(enemy.health, 200);
-    assert.equal(launchState.events.some(event =>
-        event.type === "droneCollision"
-    ), false);
 
     assert.equal(room.setInput("1", {
-        ...droneInput,
+        ...baseInput,
+        droneX: owner.x + 11
+    }, 10_000), false);
+    assert.equal(room.setInput("1", baseInput, 10_000), true);
+    assert.equal(room.setInput("1", {
+        ...baseInput,
+        droneX: owner.x + 2
+    }, 10_050), false);
+    assert.equal(room.setInput("1", {
+        ...baseInput,
+        droneX: owner.x + 0.4,
+        droneY: 1.1
+    }, 10_050), true);
+    assert.equal(room.setInput("1", {
+        ...baseInput,
+        droneX: owner.x + 0.4,
+        droneY: 5.8,
         droneFlying: true
-    }), true);
-    const flightState = room.tick(0.05, 20_050);
-    assert.equal(owner.droneActive, false);
-    assert.equal(owner.droneFlying, false);
-    assert.equal(owner.droneDestroyed, true);
-    assert.equal(enemy.health, 100);
-    assert.equal(flightState.events.filter(event =>
-        event.type === "droneCollision"
-    ).length, 1);
-});
-
-test("shell contact does not detonate a drone before flight", () => {
-    const room = new GameRoom("room-drone-shell-during-launch");
-    room.addPlayer(player(1, 1));
-    room.addPlayer(player(2, 2));
-    const shooter = room.players.get("1");
-    const droneOwner = room.players.get("2");
-    shooter.x = 0;
-    shooter.z = 0;
-    shooter.aimHeading = 90;
-    droneOwner.x = 50;
-    droneOwner.droneActive = true;
-    droneOwner.droneFlying = false;
-    droneOwner.droneX = 8;
-    droneOwner.droneY = 1.5;
-    droneOwner.droneZ = 0;
-
-    room.setInput("1", {
-        throttle: 0,
-        steering: 0,
-        fire: true,
-        aimHeading: 90,
-        hasFireOrigin: true,
-        fireOriginX: 0,
-        fireOriginY: 1.5,
-        fireOriginZ: 0
-    }, 10_000);
-    room.tick(0.05, 10_050);
-
-    assert.equal(droneOwner.droneActive, true);
-    assert.equal(droneOwner.droneFlying, false);
-    assert.equal(droneOwner.droneDestroyed, false);
-    assert.equal(room.projectiles.length, 1);
+    }, 11_700), false);
+    assert.equal(room.setInput("1", {
+        ...baseInput,
+        droneX: owner.x + 0.4,
+        droneY: 6,
+        droneFlying: true
+    }, 11_700), true);
+    assert.equal(owner.droneFlying, true);
 });
 
 test("one server projectile damages only one tank once", () => {
@@ -470,17 +440,11 @@ test("server-side projectiles destroy an enemy player's deployed drone", () => {
     shooter.aimHeading = 90;
     shooter.aimPitch = 0;
     target.x = 50;
-
-    assert.equal(room.setInput("2", {
-        throttle: 0,
-        steering: 0,
-        fire: false,
-        droneActive: true,
-        droneFlying: true,
-        droneX: 5,
-        droneY: 1.5,
-        droneZ: 0
-    }), true);
+    target.droneActive = true;
+    target.droneFlying = true;
+    target.droneX = 5;
+    target.droneY = 1.5;
+    target.droneZ = 0;
     room.setInput("1", {
         throttle: 0,
         steering: 0,
@@ -496,6 +460,67 @@ test("server-side projectiles destroy an enemy player's deployed drone", () => {
         event.type === "droneHit" &&
         event.userId === "2" &&
         event.attackerId === "1"
+    ));
+});
+
+test("a disconnect after both teams join awards victory without AI replacement", () => {
+    const room = new GameRoom("room-disconnect-victory");
+    room.addPlayer(player(1, 1));
+    room.addPlayer(player(2, 2));
+
+    assert.equal(room.removePlayer("2"), true);
+    const state = room.snapshot();
+
+    assert.equal(state.matchEnded, true);
+    assert.equal(state.winningTeam, 1);
+    assert.deepEqual(state.players.map(item => item.userId), ["1"]);
+    assert.throws(() => room.addPlayer(player(3, 2)), /match has ended/);
+});
+
+test("a one-team lobby does not resolve a PvP result", () => {
+    const room = new GameRoom("room-one-team-lobby");
+    room.addPlayer(player(1, 1));
+    room.removePlayer("1");
+    room.addPlayer(player(2, 2));
+
+    assert.equal(room.matchStarted, false);
+    assert.equal(room.snapshot().matchEnded, false);
+    assert.equal(room.snapshot().players.length, 1);
+});
+
+test("simultaneous team elimination ends in a draw", () => {
+    const room = new GameRoom("room-draw");
+    room.addPlayer(player(1, 1));
+    room.addPlayer(player(2, 2));
+    const blue = room.players.get("1");
+    const red = room.players.get("2");
+    blue.x = 0;
+    blue.z = 0;
+    red.x = 4;
+    red.z = 0;
+    blue.health = 25;
+    red.health = 25;
+
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        aimHeading: 90
+    }, 10_000);
+    room.setInput("2", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        aimHeading: 270
+    }, 10_000);
+
+    const state = room.tick(0.05, 10_050);
+    assert.equal(blue.alive, false);
+    assert.equal(red.alive, false);
+    assert.equal(state.matchEnded, true);
+    assert.equal(state.winningTeam, 0);
+    assert.ok(state.events.some(event =>
+        event.type === "matchEnded" && event.draw
     ));
 });
 
