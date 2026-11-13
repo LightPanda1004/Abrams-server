@@ -153,6 +153,27 @@ test("one server projectile damages only one tank once", () => {
     assert.equal(target.health, 75);
 });
 
+test("networked shot starts at the tank fire point", () => {
+    const room = new GameRoom("room-fire-origin");
+    room.addPlayer(player(1));
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        aimHeading: 90,
+        aimPitch: -5,
+        hasFireOrigin: true,
+        fireOriginX: -17.25,
+        fireOriginY: 3.4,
+        fireOriginZ: -45.8
+    }, 10_000);
+
+    const projectile = room.projectiles[0];
+    assert.equal(projectile.x, -17.25);
+    assert.equal(projectile.y, 3.4);
+    assert.equal(projectile.z, -45.8);
+});
+
 test("server-side projectiles destroy an enemy player's deployed drone", () => {
     const room = new GameRoom("room-drone");
     room.addPlayer(player(1, 1));

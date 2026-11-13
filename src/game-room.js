@@ -113,6 +113,13 @@ class GameRoom {
             (input.aimPitch !== undefined &&
                 (typeof input.aimPitch !== "number" ||
                     !Number.isFinite(input.aimPitch))) ||
+            (input.hasFireOrigin !== undefined &&
+                typeof input.hasFireOrigin !== "boolean") ||
+            (input.hasFireOrigin === true &&
+                [input.fireOriginX, input.fireOriginY, input.fireOriginZ]
+                    .some(value =>
+                        typeof value !== "number" ||
+                        !Number.isFinite(value))) ||
             (input.droneActive !== undefined &&
                 typeof input.droneActive !== "boolean") ||
             (input.droneActive === true &&
@@ -149,7 +156,7 @@ class GameRoom {
         if (player.alive && input.fire &&
             now - player.lastFireAt >= FIRE_COOLDOWN_MS) {
             player.lastFireAt = now;
-            const projectile = this.createProjectile(player, now);
+            const projectile = this.createProjectile(player, now, input);
             this.projectiles.push(projectile);
             this.pendingEvents.push({
                 type: "playerFired",
@@ -270,17 +277,25 @@ class GameRoom {
         };
     }
 
-    createProjectile(player, now) {
+    createProjectile(player, now, input = {}) {
         const radians = player.aimHeading * Math.PI / 180;
         return {
             id: this.nextProjectileId++,
             ownerId: player.userId,
             team: player.team,
-            x: player.x + Math.sin(radians) * 2.5,
-            z: player.z + Math.cos(radians) * 2.5,
+            x: input.hasFireOrigin === true
+                ? clamp(input.fireOriginX, -MAX_WORLD_COORDINATE - 10,
+                    MAX_WORLD_COORDINATE + 10)
+                : player.x + Math.sin(radians) * 2.5,
+            z: input.hasFireOrigin === true
+                ? clamp(input.fireOriginZ, -MAX_WORLD_COORDINATE - 10,
+                    MAX_WORLD_COORDINATE + 10)
+                : player.z + Math.cos(radians) * 2.5,
             heading: player.aimHeading,
             pitch: player.aimPitch,
-            y: 1.5,
+            y: input.hasFireOrigin === true
+                ? clamp(input.fireOriginY, -10, 50)
+                : 1.5,
             distance: 0,
             createdAt: now
         };
