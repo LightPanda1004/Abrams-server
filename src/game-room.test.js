@@ -229,7 +229,7 @@ test("projectile vertical travel matches Unity's cannon pitch direction", () => 
     assert.ok(state.projectiles[0].y > 1.5);
 });
 
-test("holding fire produces cooldown-limited projectiles and preserves aim", () => {
+test("one fire press creates one projectile until the button is released", () => {
     const room = new GameRoom("room-fire");
     room.addPlayer(player(1));
     const firstInput = {
@@ -250,9 +250,10 @@ test("holding fire produces cooldown-limited projectiles and preserves aim", () 
     });
     assert.equal(room.pendingEvents[1].type, "playerFired");
 
-    room.setInput("1", firstInput, 11_000);
-    assert.equal(room.projectiles.length, 1);
     room.setInput("1", firstInput, 11_800);
+    assert.equal(room.projectiles.length, 1);
+    room.setInput("1", { ...firstInput, fire: false }, 11_850);
+    room.setInput("1", firstInput, 11_900);
     assert.equal(room.projectiles.length, 2);
 
     const state = room.tick(0.05, 11_850);

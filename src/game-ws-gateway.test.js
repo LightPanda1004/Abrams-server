@@ -98,10 +98,15 @@ test(
     async t => {
         let assignmentPolls = 0;
         let ticketValidations = 0;
+        let roomCompletions = 0;
         let registration;
         let resolveMemberLeave;
+        let resolveRoomCompletion;
         const memberLeaveCompleted = new Promise(resolve => {
             resolveMemberLeave = resolve;
+        });
+        const roomCompletion = new Promise(resolve => {
+            resolveRoomCompletion = resolve;
         });
         const api = http.createServer((request, response) => {
             if (request.url === "/api/server/register") {
@@ -133,6 +138,12 @@ test(
             if (request.url.endsWith("/leave")) {
                 respond(response, 200, {});
                 resolveMemberLeave();
+                return;
+            }
+            if (request.url.endsWith("/complete")) {
+                roomCompletions++;
+                respond(response, 200, {});
+                resolveRoomCompletion();
                 return;
             }
             respond(response, 200, {});
@@ -190,5 +201,9 @@ test(
 
         const [closeCode] = await firstClosed;
         assert.equal(closeCode, 4004);
+        second.socket.close();
+        await roomCompletion;
+        assert.equal(roomCompletions, 1);
+        await memberLeaveCompleted;
     }
 );

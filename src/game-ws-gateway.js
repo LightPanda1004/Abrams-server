@@ -95,6 +95,10 @@ function createGateway(config) {
     let emptySince = 0;
     let startedRoomId = "";
     let stopping = false;
+    let roomHadPlayers = false;
+    let completionInProgressRoomId = "";
+    let completionRetryAt = 0;
+    let completionFailures = 0;
     let assignmentPollPromise = null;
     let heartbeatPromise = null;
 
@@ -164,6 +168,9 @@ function createGateway(config) {
                     : null;
                 emptySince = 0;
                 startedRoomId = "";
+                roomHadPlayers = false;
+                completionRetryAt = 0;
+                completionFailures = 0;
                 if (activeRoom) {
                     console.log(`Dedicated game room ${activeRoomId} is ready.`);
                 }
@@ -181,16 +188,18 @@ function createGateway(config) {
         });
     }
 
-    async function startRoomIfReady() {
-        if (!activeRoom || activeRoom.players.size < 2 ||
-            startedRoomId === activeRoomId) {
+    async function startRoomIfReady(roomId) {
+        if (!activeRoom || activeRoomId !== roomId ||
+            activeRoom.players.size < 2 || startedRoomId === roomId) {
             return;
         }
         await apiRequest(
-            `/api/server/rooms/${encodeURIComponent(activeRoomId)}/start`,
+            `/api/server/rooms/${encodeURIComponent(roomId)}/start`,
             { serverId: config.serverId }
         );
-        startedRoomId = activeRoomId;
+        if (activeRoomId === roomId && activeRoom?.players.size >= 2) {
+            startedRoomId = roomId;
+        }
     }
 
     function broadcastState(state) {
@@ -199,27 +208,54 @@ function createGateway(config) {
         }
     }
 
+    async function completeEmptyRoom(roomId) {
+        if (completionInProgressRoomId === roomId) {
+            return;
+        }
+        completionInProgressRoomId = roomId;
+        try {
+            await apiRequest(
+                `/api/server/rooms/${encodeURIComponent(roomId)}/complete`,
+                { serverId: config.serverId }
+            );
+            if (activeRoomId === roomId &&
+                activeRoom &&
+                activeRoom.players.size === 0) {
+                activeRoom = null;
+                activeRoomId = "";
+                startedRoomId = "";
+                emptySince = 0;
+                roomHadPlayers = false;
+                completionRetryAt = 0;
+                completionFailures = 0;
+            }
+        } finally {
+            completionInProgressRoomId = "";
+        }
+    }
+
     function closeRoomWhenEmpty(now) {
         if (!activeRoom || activeRoom.players.size > 0) {
             emptySince = 0;
             return;
         }
-        if (!emptySince) {
+        if (!roomHadPlayers && !emptySince) {
             emptySince = now;
             return;
         }
-        if (now - emptySince < EMPTY_ROOM_GRACE_MS) {
+        if (!roomHadPlayers && now - emptySince < EMPTY_ROOM_GRACE_MS) {
+            return;
+        }
+        if (completionInProgressRoomId || now < completionRetryAt) {
             return;
         }
         const roomId = activeRoomId;
-        activeRoom = null;
-        activeRoomId = "";
-        startedRoomId = "";
-        emptySince = 0;
-        apiRequest(
-            `/api/server/rooms/${encodeURIComponent(roomId)}/complete`,
-            { serverId: config.serverId }
-        ).catch(error => {
+        completeEmptyRoom(roomId).catch(error => {
+            completionFailures++;
+            completionRetryAt = Date.now() + Math.min(
+                30_000,
+                1_000 * (2 ** Math.min(completionFailures - 1, 5))
+            );
             console.error(`Could not complete empty room ${roomId}:`, error.message);
         });
     }
@@ -228,15 +264,17 @@ function createGateway(config) {
         if (!userId || socketsByUserId.get(userId) !== socket) {
             return;
         }
+        const roomId = activeRoomId;
         socketsByUserId.delete(userId);
         activeRoom?.removePlayer(userId);
+        closeRoomWhenEmpty(Date.now());
         sendJson(socket, { type: "disconnected" });
         if (activeRoom) {
             broadcastState(activeRoom.snapshot());
         }
         try {
             await apiRequest(
-                `/api/server/rooms/${encodeURIComponent(activeRoomId)}/leave`,
+                `/api/server/rooms/${encodeURIComponent(roomId)}/leave`,
                 { serverId: config.serverId, userId }
             );
         } catch (error) {
@@ -268,6 +306,7 @@ function createGateway(config) {
 
     function handleConnection(socket) {
         let userId = "";
+        let authenticating = false;
         let messageCount = 0;
         let messageWindowStart = Date.now();
         const authenticationTimer = setTimeout(() => {
@@ -298,6 +337,10 @@ function createGateway(config) {
             }
 
             if (!userId) {
+                if (authenticating) {
+                    socket.close(4001, "Authentication is already in progress.");
+                    return;
+                }
                 if (message.type !== "authenticate" ||
                     typeof message.ticket !== "string" ||
                     message.ticket.length < 32 ||
@@ -305,6 +348,7 @@ function createGateway(config) {
                     socket.close(4001, "Authentication required.");
                     return;
                 }
+                authenticating = true;
                 clearTimeout(authenticationTimer);
                 try {
                     await pollAssignment();
@@ -312,10 +356,28 @@ function createGateway(config) {
                         socket.close(4003, "This server is not assigned to a room.");
                         return;
                     }
+                    if (completionInProgressRoomId === activeRoomId) {
+                        socket.close(4003, "This room is closing.");
+                        return;
+                    }
                     const ticket = await validateTicket(message.ticket);
-                    if (!activeRoom ||
+                    if (socket.readyState !== WebSocket.OPEN ||
+                        completionInProgressRoomId === activeRoomId ||
+                        !activeRoom ||
                         String(ticket.roomId) !== activeRoomId) {
-                        socket.close(4003, "This server is not assigned to that room.");
+                        await apiRequest(
+                            `/api/server/rooms/${encodeURIComponent(ticket.roomId)}/leave`,
+                            {
+                                serverId: config.serverId,
+                                userId: String(ticket.userId)
+                            }
+                        );
+                        if (socket.readyState === WebSocket.OPEN) {
+                            socket.close(
+                                4003,
+                                "This server is no longer accepting players for that room."
+                            );
+                        }
                         return;
                     }
                     if (socketsByUserId.has(ticket.userId)) {
@@ -329,6 +391,8 @@ function createGateway(config) {
                         playerName: ticket.playerName,
                         team: ticket.team
                     });
+                    roomHadPlayers = true;
+                    emptySince = 0;
                     userId = String(ticket.userId);
                     socketsByUserId.set(userId, socket);
                     sendJson(socket, {
@@ -339,10 +403,12 @@ function createGateway(config) {
                         team: ticket.team,
                         snapshot: activeRoom.snapshot()
                     });
-                    await startRoomIfReady();
+                    await startRoomIfReady(activeRoomId);
                     broadcastState(activeRoom.snapshot());
                 } catch (error) {
-                    socket.close(4003, error.message);
+                    if (socket.readyState === WebSocket.OPEN) {
+                        socket.close(4003, error.message);
+                    }
                 }
                 return;
             }

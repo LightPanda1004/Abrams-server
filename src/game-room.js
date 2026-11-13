@@ -73,7 +73,8 @@ class GameRoom {
             deaths: 0,
             alive: true,
             respawnAt: 0,
-            lastFireAt: 0
+            lastFireAt: 0,
+            fireInputPressed: false
         };
         this.players.set(userId, player);
         this.pendingEvents.push({
@@ -153,7 +154,9 @@ class GameRoom {
                 MAX_WORLD_COORDINATE);
         }
 
-        if (player.alive && input.fire &&
+        const firePressed = input.fire && !player.fireInputPressed;
+        player.fireInputPressed = input.fire;
+        if (player.alive && firePressed &&
             now - player.lastFireAt >= FIRE_COOLDOWN_MS) {
             player.lastFireAt = now;
             const projectile = this.createProjectile(player, now, input);
