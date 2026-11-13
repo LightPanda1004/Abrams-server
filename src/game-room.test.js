@@ -84,6 +84,42 @@ test("movement follows tank acceleration and turns more slowly while reversing",
     assert.ok(Math.abs(reversed.heading - headingBeforeReverse - 4.5) < 0.001);
 });
 
+test("online movement applies the Abrams speed boost within the configured cap", () => {
+    const room = new GameRoom("room-speed-boost");
+    room.addPlayer(player(1));
+    room.setInput("1", {
+        throttle: 1,
+        steering: 0,
+        speedBoostAmount: 100,
+        fire: false
+    });
+
+    for (let tick = 0; tick < 60; tick++) {
+        room.tick(0.1);
+    }
+
+    assert.equal(room.players.get("1").speed, 11);
+});
+
+test("online shell speed and reload match the Abrams single-player settings", () => {
+    const room = new GameRoom("room-abrams-shell-settings");
+    room.addPlayer(player(1));
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        aimHeading: 90
+    }, 10_000);
+
+    const initialEvent = room.pendingEvents.find(event =>
+        event.type === "playerFired"
+    );
+    assert.equal(initialEvent.cooldown, 3);
+
+    const state = room.tick(0.05, 10_050);
+    assert.ok(Math.abs(state.projectiles[0].x + 13.5) < 0.001);
+});
+
 test("server-side projectiles damage 200-health enemies and award a kill", () => {
     const room = new GameRoom("room-4");
     room.addPlayer(player(1, 1));
@@ -106,7 +142,7 @@ test("server-side projectiles damage 200-health enemies and award a kill", () =>
         for (let tick = 0; tick < 50; tick++) {
             room.tick(0.05, now + tick * 50);
         }
-        now += 2000;
+        now += 3200;
         room.setInput("1", {
             throttle: 0,
             steering: 0,
@@ -323,13 +359,13 @@ test("one fire press creates one projectile until the button is released", () =>
     });
     assert.equal(room.pendingEvents[1].type, "playerFired");
 
-    room.setInput("1", firstInput, 11_800);
+    room.setInput("1", firstInput, 12_999);
     assert.equal(room.projectiles.length, 1);
-    room.setInput("1", { ...firstInput, fire: false }, 11_850);
-    room.setInput("1", firstInput, 11_900);
+    room.setInput("1", { ...firstInput, fire: false }, 13_000);
+    room.setInput("1", firstInput, 13_000);
     assert.equal(room.projectiles.length, 2);
 
-    const state = room.tick(0.05, 11_850);
+    const state = room.tick(0.05, 13_050);
     assert.equal(state.players[0].aimHeading, 123);
     assert.equal(state.players[0].aimPitch, 12);
     assert.equal(state.projectiles[0].heading, 123);

@@ -2,6 +2,7 @@
 
 const ROOM_CAPACITY = 32;
 const MAX_WORLD_COORDINATE = 100;
+const MAX_SPEED_BOOST = 5;
 const TANK_HALF_WIDTH = 1.21;
 const TANK_HALF_LENGTH = 3.45;
 const TANK_COLLIDER_HEIGHT = 3.2;
@@ -12,10 +13,10 @@ const REVERSE_SPEED = 3;
 const ACCELERATION = 2;
 const DECELERATION = 3;
 const TURN_SPEED = 45;
-const PROJECTILE_SPEED = 42;
+const PROJECTILE_SPEED = 160;
 const PROJECTILE_DAMAGE = 25;
-const PROJECTILE_RANGE = 80;
-const FIRE_COOLDOWN_MS = 1800;
+const PROJECTILE_RANGE = 800;
+const FIRE_COOLDOWN_MS = 3000;
 const RESPAWN_DELAY_MS = 3500;
 
 function clamp(value, minimum, maximum) {
@@ -67,6 +68,7 @@ class GameRoom {
             aimPitch: 0,
             throttle: 0,
             steering: 0,
+            speedBoostAmount: 0,
             speed: 0,
             droneActive: false,
             droneDestroyed: false,
@@ -113,6 +115,9 @@ class GameRoom {
             typeof input.fire !== "boolean" ||
             !Number.isFinite(input.throttle) ||
             !Number.isFinite(input.steering) ||
+            (input.speedBoostAmount !== undefined &&
+                (typeof input.speedBoostAmount !== "number" ||
+                    !Number.isFinite(input.speedBoostAmount))) ||
             (input.aimHeading !== undefined &&
                 (typeof input.aimHeading !== "number" ||
                     !Number.isFinite(input.aimHeading))) ||
@@ -139,6 +144,9 @@ class GameRoom {
             : 0;
         player.steering = player.alive
             ? clamp(input.steering, -1, 1)
+            : 0;
+        player.speedBoostAmount = player.alive
+            ? clamp(input.speedBoostAmount || 0, 0, MAX_SPEED_BOOST)
             : 0;
         if (Number.isFinite(input.aimHeading)) {
             player.aimHeading =
@@ -189,16 +197,28 @@ class GameRoom {
             const targetSpeed = player.throttle >= 0
                 ? player.throttle * FORWARD_SPEED
                 : player.throttle * REVERSE_SPEED;
+            const boostedTargetSpeed =
+                Math.abs(player.throttle) > 0.01
+                    ? targetSpeed +
+                        Math.sign(player.throttle) *
+                            player.speedBoostAmount
+                    : targetSpeed;
             const accelerating =
-                Math.abs(targetSpeed) > Math.abs(player.speed) &&
-                (Math.sign(targetSpeed) === Math.sign(player.speed) ||
+                Math.abs(boostedTargetSpeed) > Math.abs(player.speed) &&
+                (Math.sign(boostedTargetSpeed) === Math.sign(player.speed) ||
                     Math.abs(player.speed) < 0.01);
             const speedChange = (accelerating ? ACCELERATION : DECELERATION) *
                 delta;
-            if (player.speed < targetSpeed) {
-                player.speed = Math.min(targetSpeed, player.speed + speedChange);
-            } else if (player.speed > targetSpeed) {
-                player.speed = Math.max(targetSpeed, player.speed - speedChange);
+            if (player.speed < boostedTargetSpeed) {
+                player.speed = Math.min(
+                    boostedTargetSpeed,
+                    player.speed + speedChange
+                );
+            } else if (player.speed > boostedTargetSpeed) {
+                player.speed = Math.max(
+                    boostedTargetSpeed,
+                    player.speed - speedChange
+                );
             }
 
             const direction = player.speed < -0.01 ? -1 : 1;
@@ -359,12 +379,29 @@ class GameRoom {
                 continue;
             }
 
-            const droneTarget = [...this.players.values()].find(player =>
-                player.droneActive &&
-                !player.droneDestroyed &&
-                player.team !== projectile.team &&
-                squaredDroneDistance(player, projectile) <= 2.5 * 2.5
-            );
+            let droneTarget = null;
+            let droneImpact = null;
+            for (const player of this.players.values()) {
+                if (!player.droneActive || player.droneDestroyed ||
+                    player.team === projectile.team) {
+                    continue;
+                }
+                const contact = getSegmentSphereContact(
+                    previousPosition,
+                    projectile,
+                    {
+                        x: player.droneX,
+                        y: player.droneY,
+                        z: player.droneZ
+                    },
+                    2.5
+                );
+                if (contact) {
+                    droneTarget = player;
+                    droneImpact = contact;
+                    break;
+                }
+            }
             if (droneTarget) {
                 droneTarget.droneActive = false;
                 droneTarget.droneDestroyed = true;
@@ -372,9 +409,9 @@ class GameRoom {
                     type: "droneHit",
                     userId: droneTarget.userId,
                     attackerId: projectile.ownerId,
-                    x: round(projectile.x),
-                    y: round(projectile.y),
-                    z: round(projectile.z),
+                    x: round(droneImpact.x),
+                    y: round(droneImpact.y),
+                    z: round(droneImpact.z),
                     projectileId: projectile.id
                 });
                 continue;
@@ -393,6 +430,7 @@ class GameRoom {
         player.throttle = 0;
         player.steering = 0;
         player.speed = 0;
+        player.speedBoostAmount = 0;
         player.x = player.team === 1 ? -24 : 24;
         player.z = 0;
         player.heading = player.team === 1 ? 90 : -90;
@@ -461,6 +499,7 @@ class GameRoom {
 
         target.alive = false;
         target.droneActive = false;
+        target.speedBoostAmount = 0;
         target.deaths++;
         target.respawnAt = now + RESPAWN_DELAY_MS;
         const attacker = this.players.get(attackerId);
@@ -627,11 +666,36 @@ function tankIntersectsDrone(tank, droneOwner) {
         DRONE_COLLISION_RADIUS * DRONE_COLLISION_RADIUS;
 }
 
-function squaredDroneDistance(player, projectile) {
-    const dx = player.droneX - projectile.x;
-    const dy = player.droneY - projectile.y;
-    const dz = player.droneZ - projectile.z;
-    return dx * dx + dy * dy + dz * dz;
+function getSegmentSphereContact(start, end, center, radius) {
+    const segment = {
+        x: end.x - start.x,
+        y: end.y - start.y,
+        z: end.z - start.z
+    };
+    const lengthSquared =
+        segment.x * segment.x +
+        segment.y * segment.y +
+        segment.z * segment.z;
+    const fraction = lengthSquared > 0
+        ? clamp(
+            ((center.x - start.x) * segment.x +
+                (center.y - start.y) * segment.y +
+                (center.z - start.z) * segment.z) / lengthSquared,
+            0,
+            1
+        )
+        : 0;
+    const contact = {
+        x: start.x + segment.x * fraction,
+        y: start.y + segment.y * fraction,
+        z: start.z + segment.z * fraction
+    };
+    const dx = center.x - contact.x;
+    const dy = center.y - contact.y;
+    const dz = center.z - contact.z;
+    return dx * dx + dy * dy + dz * dz <= radius * radius
+        ? contact
+        : null;
 }
 
 function round(value) {
