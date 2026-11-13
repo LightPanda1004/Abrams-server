@@ -17,6 +17,7 @@ const PROJECTILE_SPEED = 160;
 const PROJECTILE_DAMAGE = 25;
 const PROJECTILE_RANGE = 800;
 const FIRE_COOLDOWN_MS = 3000;
+const RESPAWN_DELAY_MS = 3500;
 
 function clamp(value, minimum, maximum) {
     return Math.max(minimum, Math.min(maximum, value));
@@ -38,7 +39,6 @@ class GameRoom {
         this.projectiles = [];
         this.pendingEvents = [];
         this.nextProjectileId = 1;
-        this.winningTeam = 0;
     }
 
     addPlayer({ userId, playerName, team }) {
@@ -46,9 +46,6 @@ class GameRoom {
             typeof playerName !== "string" || !playerName ||
             (team !== 1 && team !== 2)) {
             throw new TypeError("Player identity, name, or team is invalid.");
-        }
-        if (this.winningTeam !== 0) {
-            throw new Error("The match has already ended.");
         }
         if (this.players.has(userId)) {
             throw new Error("This player is already connected to the room.");
@@ -82,6 +79,7 @@ class GameRoom {
             kills: 0,
             deaths: 0,
             alive: true,
+            respawnAt: 0,
             lastFireAt: 0,
             fireInputPressed: false
         };
@@ -110,8 +108,7 @@ class GameRoom {
 
     setInput(userId, input, now = Date.now()) {
         const player = this.players.get(userId);
-        if (this.winningTeam !== 0 || !player ||
-            !input || typeof input !== "object" ||
+        if (!player || !input || typeof input !== "object" ||
             Array.isArray(input) ||
             typeof input.throttle !== "number" ||
             typeof input.steering !== "number" ||
@@ -146,9 +143,7 @@ class GameRoom {
             ? clamp(input.throttle, -1, 1)
             : 0;
         player.steering = player.alive
-            ? Math.abs(input.steering) < 0.15
-                ? 0
-                : clamp(input.steering, -1, 1)
+            ? clamp(input.steering, -1, 1)
             : 0;
         player.speedBoostAmount = player.alive
             ? clamp(input.speedBoostAmount || 0, 0, MAX_SPEED_BOOST)
@@ -192,7 +187,10 @@ class GameRoom {
     tick(deltaSeconds, now = Date.now()) {
         const delta = clamp(deltaSeconds, 0, 0.1);
         for (const player of this.players.values()) {
-            if (this.winningTeam !== 0 || !player.alive) {
+            if (!player.alive) {
+                if (now >= player.respawnAt) {
+                    this.respawn(player);
+                }
                 continue;
             }
 
@@ -240,12 +238,8 @@ class GameRoom {
         }
 
         this.resolveTankCollisions();
-        if (this.winningTeam === 0)
-            this.resolveDroneCollisions();
-        if (this.winningTeam === 0)
-            this.advanceProjectiles(delta, now);
-        if (this.winningTeam !== 0)
-            this.projectiles = [];
+        this.resolveDroneCollisions(now);
+        this.advanceProjectiles(delta, now);
         const events = this.pendingEvents;
         this.pendingEvents = [];
         return {
@@ -280,8 +274,7 @@ class GameRoom {
                 heading: round(projectile.heading),
                 pitch: round(projectile.pitch)
             })),
-            events,
-            winningTeam: this.winningTeam
+            events
         };
     }
 
@@ -310,8 +303,7 @@ class GameRoom {
                 alive: player.alive
             })),
             projectiles: [],
-            events: [],
-            winningTeam: this.winningTeam
+            events: []
         };
     }
 
@@ -342,9 +334,6 @@ class GameRoom {
     advanceProjectiles(delta, now) {
         const remaining = [];
         for (const projectile of this.projectiles) {
-            if (this.winningTeam !== 0)
-                break;
-
             const previousPosition = {
                 x: projectile.x,
                 y: projectile.y,
@@ -386,7 +375,7 @@ class GameRoom {
                     z: round(impact.z),
                     projectileId: projectile.id
                 });
-                this.handleTankDestroyed(target, projectile.ownerId);
+                this.handleTankDestroyed(target, projectile.ownerId, now);
                 continue;
             }
 
@@ -428,12 +417,30 @@ class GameRoom {
                 continue;
             }
 
-            if (this.winningTeam === 0 &&
-                projectile.distance < PROJECTILE_RANGE) {
+            if (projectile.distance < PROJECTILE_RANGE) {
                 remaining.push(projectile);
             }
         }
-        this.projectiles = this.winningTeam === 0 ? remaining : [];
+        this.projectiles = remaining;
+    }
+
+    respawn(player) {
+        player.alive = true;
+        player.health = 200;
+        player.throttle = 0;
+        player.steering = 0;
+        player.speed = 0;
+        player.speedBoostAmount = 0;
+        player.x = player.team === 1 ? -24 : 24;
+        player.z = 0;
+        player.heading = player.team === 1 ? 90 : -90;
+        player.aimHeading = player.heading;
+        player.aimPitch = 0;
+        player.respawnAt = 0;
+        this.pendingEvents.push({
+            type: "playerRespawned",
+            userId: player.userId
+        });
     }
 
     resolveTankCollisions() {
@@ -454,16 +461,14 @@ class GameRoom {
         }
     }
 
-    resolveDroneCollisions() {
+    resolveDroneCollisions(now) {
         for (const owner of this.players.values()) {
-            if (this.winningTeam !== 0 || !owner.alive || !owner.droneActive ||
+            if (!owner.alive || !owner.droneActive ||
                 owner.droneDestroyed) {
                 continue;
             }
             const target = [...this.players.values()].find(player =>
                 player.alive &&
-                player.userId !== owner.userId &&
-                player.team !== owner.team &&
                 tankIntersectsDrone(player, owner)
             );
             if (!target)
@@ -484,11 +489,11 @@ class GameRoom {
                 y: round(owner.droneY),
                 z: round(owner.droneZ)
             });
-            this.handleTankDestroyed(target, owner.userId);
+            this.handleTankDestroyed(target, owner.userId, now);
         }
     }
 
-    handleTankDestroyed(target, attackerId) {
+    handleTankDestroyed(target, attackerId, now) {
         if (target.health > 0 || !target.alive)
             return;
 
@@ -496,6 +501,7 @@ class GameRoom {
         target.droneActive = false;
         target.speedBoostAmount = 0;
         target.deaths++;
+        target.respawnAt = now + RESPAWN_DELAY_MS;
         const attacker = this.players.get(attackerId);
         if (attacker)
             attacker.kills++;
@@ -504,33 +510,6 @@ class GameRoom {
             userId: target.userId,
             attackerId: attacker ? attacker.userId : ""
         });
-        this.checkForVictory();
-    }
-
-    checkForVictory() {
-        if (this.winningTeam !== 0)
-            return;
-
-        const teams = new Set(
-            [...this.players.values()].map(player => player.team)
-        );
-        if (teams.size < 2)
-            return;
-
-        for (const team of teams) {
-            const hasLivingPlayer = [...this.players.values()].some(player =>
-                player.team === team && player.alive
-            );
-            if (hasLivingPlayer)
-                continue;
-
-            this.winningTeam = team === 1 ? 2 : 1;
-            this.pendingEvents.push({
-                type: "matchEnded",
-                winningTeam: this.winningTeam
-            });
-            return;
-        }
     }
 }
 

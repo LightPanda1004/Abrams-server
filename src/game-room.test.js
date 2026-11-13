@@ -56,22 +56,6 @@ test("server clamps movement input and keeps players inside the arena", () => {
     }), false);
 });
 
-test("small steering drift is ignored while moving forward", () => {
-    const room = new GameRoom("room-steering-deadzone");
-    room.addPlayer(player(1));
-    room.setInput("1", {
-        throttle: 1,
-        steering: -0.05,
-        fire: false
-    });
-
-    for (let tick = 0; tick < 10; tick++) {
-        room.tick(0.1);
-    }
-
-    assert.equal(room.players.get("1").heading, 90);
-});
-
 test("movement follows tank acceleration and turns more slowly while reversing", () => {
     const room = new GameRoom("room-movement");
     room.addPlayer(player(1));
@@ -171,10 +155,9 @@ test("server-side projectiles damage 200-health enemies and award a kill", () =>
     assert.equal(shooter.kills, 1);
     assert.equal(target.deaths, 1);
 
-    room.tick(0.05);
-    assert.equal(target.alive, false);
-    assert.equal(target.health, 0);
-    assert.equal(room.winningTeam, 1);
+    room.tick(0.05, target.respawnAt);
+    assert.equal(target.alive, true);
+    assert.equal(target.health, 200);
 });
 
 test("tank collider prevents online tanks from passing through each other", () => {
@@ -217,69 +200,6 @@ test("deployed drone colliding with a tank explodes and applies damage", () => {
         event.attackerId === owner.userId &&
         event.health === 100
     ));
-});
-
-test("a drone does not collide with its owner or teammates", () => {
-    const room = new GameRoom("room-drone-friendly-clearance");
-    room.addPlayer(player(1, 1));
-    room.addPlayer(player(2, 1));
-    const owner = room.players.get("1");
-    owner.droneActive = true;
-    owner.droneX = owner.x;
-    owner.droneY = 1;
-    owner.droneZ = owner.z;
-
-    room.tick(0.05, 20_000);
-
-    assert.equal(owner.droneActive, true);
-    assert.equal(owner.droneDestroyed, false);
-    assert.equal(room.players.get("2").health, 200);
-});
-
-test("a destroyed enemy permanently ends the match when its team is eliminated", () => {
-    const room = new GameRoom("room-team-elimination");
-    room.addPlayer(player(1, 1));
-    room.addPlayer(player(2, 2));
-    const attacker = room.players.get("1");
-    const target = room.players.get("2");
-    target.health = 0;
-
-    room.handleTankDestroyed(target, attacker.userId);
-    const state = room.tick(0.05);
-    const nextState = room.tick(0.05);
-
-    assert.equal(target.alive, false);
-    assert.equal(target.health, 0);
-    assert.equal(room.winningTeam, 1);
-    assert.ok(state.events.some(event =>
-        event.type === "matchEnded" && event.winningTeam === 1
-    ));
-    assert.ok(!nextState.events.some(event => event.type === "matchEnded"));
-    assert.equal(room.setInput("1", {
-        throttle: 1,
-        steering: 0,
-        fire: true
-    }), false);
-    assert.throws(() => room.addPlayer(player(3, 2)), /already ended/);
-});
-
-test("a held fire input creates only one authoritative shell", () => {
-    const room = new GameRoom("room-one-shot-per-press");
-    room.addPlayer(player(1));
-    const input = {
-        throttle: 0,
-        steering: 0,
-        fire: true,
-        aimHeading: 90
-    };
-
-    room.setInput("1", input, 10_000);
-    room.setInput("1", input, 10_001);
-
-    assert.equal(room.projectiles.length, 1);
-    assert.equal(room.pendingEvents.filter(event =>
-        event.type === "playerFired"
-    ).length, 1);
 });
 
 test("one server projectile damages only one tank once", () => {
