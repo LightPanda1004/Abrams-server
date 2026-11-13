@@ -399,11 +399,10 @@ function createGateway(config) {
                         previousRoom?.sockets.delete(
                             String(ticket.userId)
                         );
-                        if (previousRoom &&
-                            previous.roomId !== ticketRoomId) {
-                            previousRoom.gameRoom.removePlayer(
-                                String(ticket.userId)
-                            );
+                        previousRoom?.gameRoom.removePlayer(
+                            String(ticket.userId)
+                        );
+                        if (previousRoom) {
                             closeRoomWhenEmpty(previousRoom, Date.now());
                             broadcastState(
                                 previousRoom,
@@ -429,15 +428,11 @@ function createGateway(config) {
                             });
                         }
                     }
-                    if (!roomRuntime.gameRoom.players.has(
-                        String(ticket.userId)
-                    )) {
-                        roomRuntime.gameRoom.addPlayer({
-                            userId: String(ticket.userId),
-                            playerName: ticket.playerName,
-                            team: ticket.team
-                        });
-                    }
+                    roomRuntime.gameRoom.addPlayer({
+                        userId: String(ticket.userId),
+                        playerName: ticket.playerName,
+                        team: ticket.team
+                    });
                     roomRuntime.hadPlayers = true;
                     roomRuntime.emptySince = 0;
                     userId = String(ticket.userId);

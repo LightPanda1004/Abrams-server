@@ -120,7 +120,72 @@ test("online shell speed and reload match the Abrams single-player settings", ()
     assert.ok(Math.abs(state.projectiles[0].x + 13.5) < 0.001);
 });
 
-test("server-side projectiles permanently destroy 200-health enemies", () => {
+test("online shell follows the reported muzzle position and direction", () => {
+    const room = new GameRoom("room-muzzle-direction");
+    room.addPlayer(player(1));
+    const shooter = room.players.get("1");
+    const muzzleHeading = 30 * Math.PI / 180;
+    const muzzlePitch = -10 * Math.PI / 180;
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        aimHeading: 0,
+        aimPitch: 0,
+        hasFireOrigin: true,
+        fireOriginX: shooter.x,
+        fireOriginY: 2.5,
+        fireOriginZ: shooter.z + 4.89,
+        hasFireDirection: true,
+        fireDirectionX: Math.sin(muzzleHeading) * Math.cos(muzzlePitch),
+        fireDirectionY: -Math.sin(muzzlePitch),
+        fireDirectionZ: Math.cos(muzzleHeading) * Math.cos(muzzlePitch)
+    }, 10_000);
+
+    const state = room.tick(0.05, 10_050);
+    const projectile = state.projectiles[0];
+
+    assert.ok(Math.abs(projectile.heading - 30) < 0.001);
+    assert.ok(Math.abs(projectile.pitch + 10) < 0.001);
+    assert.ok(Math.abs(
+        projectile.x -
+        (shooter.x + Math.sin(muzzleHeading) *
+            Math.cos(muzzlePitch) * 8)
+    ) < 0.001);
+    assert.ok(projectile.z > shooter.z + 4.89);
+    assert.ok(projectile.y > 2.5);
+});
+
+test("server rejects invalid muzzle data", () => {
+    const room = new GameRoom("room-invalid-muzzle");
+    room.addPlayer(player(1));
+    const shooter = room.players.get("1");
+    const input = {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        hasFireOrigin: true,
+        fireOriginX: shooter.x + 20,
+        fireOriginY: 2,
+        fireOriginZ: shooter.z,
+        hasFireDirection: true,
+        fireDirectionX: 0,
+        fireDirectionY: 0,
+        fireDirectionZ: 0
+    };
+
+    assert.equal(room.setInput("1", input, 10_000), false);
+    assert.equal(room.projectiles.length, 0);
+
+    assert.equal(room.setInput("1", {
+        ...input,
+        fireOriginX: shooter.x,
+        fireDirectionY: 1
+    }, 10_000), false);
+    assert.equal(room.projectiles.length, 0);
+});
+
+test("server-side projectiles damage 200-health enemies and award a kill", () => {
     const room = new GameRoom("room-4");
     room.addPlayer(player(1, 1));
     room.addPlayer(player(2, 2));
@@ -155,82 +220,9 @@ test("server-side projectiles permanently destroy 200-health enemies", () => {
     assert.equal(shooter.kills, 1);
     assert.equal(target.deaths, 1);
 
-    room.tick(0.05);
-    assert.equal(target.alive, false);
-    assert.equal(target.health, 0);
-    assert.equal(room.winningTeam, 1);
-    assert.equal(room.setInput("2", {
-        throttle: 1,
-        steering: 1,
-        fire: true
-    }), true);
-    assert.equal(target.alive, false);
-    assert.equal(room.projectiles.length, 0);
-});
-
-test("both teams destroyed in one update produce one draw result", () => {
-    const room = new GameRoom("room-simultaneous-elimination");
-    room.addPlayer(player(1, 1));
-    room.addPlayer(player(2, 2));
-    const blue = room.players.get("1");
-    const red = room.players.get("2");
-    blue.health = 0;
-    red.health = 0;
-
-    room.handleTankDestroyed(blue, red.userId);
-    room.handleTankDestroyed(red, blue.userId);
-    const ended = room.tick(0.05);
-    const following = room.tick(0.05);
-
-    assert.equal(blue.alive, false);
-    assert.equal(red.alive, false);
-    assert.equal(room.winningTeam, 0);
-    assert.equal(room.matchDraw, true);
-    assert.equal(ended.events.filter(event =>
-        event.type === "matchEnded" && event.matchDraw
-    ).length, 1);
-    assert.equal(following.events.filter(event =>
-        event.type === "matchEnded"
-    ).length, 0);
-});
-
-test("reconnecting a disconnected player restores their destroyed state", () => {
-    const room = new GameRoom("room-reconnect-destroyed");
-    room.addPlayer(player(1, 1));
-    room.addPlayer(player(2, 2));
-    const disconnected = room.players.get("2");
-    disconnected.alive = false;
-    disconnected.health = 0;
-    disconnected.deaths = 1;
-    const originalPosition = { x: disconnected.x, z: disconnected.z };
-
-    assert.equal(room.removePlayer("2"), true);
-    room.addPlayer(player(2, 2));
-
-    const reconnected = room.players.get("2");
-    assert.equal(reconnected.alive, false);
-    assert.equal(reconnected.health, 0);
-    assert.equal(reconnected.deaths, 1);
-    assert.deepEqual(
-        { x: reconnected.x, z: reconnected.z },
-        originalPosition
-    );
-    assert.throws(() => room.addPlayer(player(2, 2)), /already connected/);
-});
-
-test("disconnected players do not remain alive for victory checks", () => {
-    const room = new GameRoom("room-disconnected-victory");
-    room.addPlayer(player(1, 1));
-    room.addPlayer(player(2, 2));
-    assert.equal(room.removePlayer("1"), true);
-
-    const state = room.tick(0.05);
-
-    assert.equal(state.winningTeam, 2);
-    assert.equal(state.matchDraw, false);
-    assert.equal(state.events.filter(event =>
-        event.type === "matchEnded"
-    ).length, 1);
+    room.tick(0.05, target.respawnAt);
+    assert.equal(target.alive, true);
+    assert.equal(target.health, 200);
 });
 
 test("tank collider prevents online tanks from passing through each other", () => {
@@ -273,26 +265,6 @@ test("deployed drone colliding with a tank explodes and applies damage", () => {
         event.attackerId === owner.userId &&
         event.health === 100
     ));
-});
-
-test("a drone ignores its owner and friendly tanks", () => {
-    const room = new GameRoom("room-drone-safe-launch");
-    room.addPlayer(player(1, 1));
-    room.addPlayer(player(2, 1));
-    const owner = room.players.get("1");
-    const teammate = room.players.get("2");
-    owner.droneActive = true;
-    owner.droneX = owner.x;
-    owner.droneY = 2;
-    owner.droneZ = owner.z;
-    teammate.x = owner.x;
-    teammate.z = owner.z;
-
-    room.tick(0.05);
-
-    assert.equal(owner.droneActive, true);
-    assert.equal(owner.droneDestroyed, false);
-    assert.equal(teammate.health, 200);
 });
 
 test("one server projectile damages only one tank once", () => {
@@ -374,61 +346,6 @@ test("networked shot starts at the tank fire point", () => {
     assert.equal(projectile.x, -17.25);
     assert.equal(projectile.y, 3.4);
     assert.equal(projectile.z, -45.8);
-});
-
-test("server shell direction follows the reported cannon muzzle vector", () => {
-    const room = new GameRoom("room-fire-muzzle-direction");
-    room.addPlayer(player(1));
-    room.setInput("1", {
-        throttle: 0,
-        steering: 0,
-        fire: true,
-        aimHeading: 0,
-        aimPitch: 0,
-        hasFireDirection: true,
-        fireDirectionX: 0,
-        fireDirectionY: 0.5,
-        fireDirectionZ: Math.sqrt(0.75)
-    }, 10_000);
-
-    const projectile = room.tick(0.05, 10_050).projectiles[0];
-
-    assert.equal(projectile.heading, 0);
-    assert.ok(Math.abs(projectile.pitch + 30) < 0.001);
-    assert.ok(projectile.y > 1.5);
-});
-
-test("server rejects invalid muzzle positions and directions", () => {
-    const invalidDirectionRoom = new GameRoom("room-invalid-direction");
-    invalidDirectionRoom.addPlayer(player(1));
-    const invalidDirectionInput = {
-        throttle: 0,
-        steering: 0,
-        fire: true,
-        hasFireOrigin: true,
-        fireOriginX: -17,
-        fireOriginY: 3,
-        fireOriginZ: -48,
-        hasFireDirection: true,
-        fireDirectionX: 0,
-        fireDirectionY: 0,
-        fireDirectionZ: 0
-    };
-
-    assert.equal(
-        invalidDirectionRoom.setInput("1", invalidDirectionInput, 10_000),
-        false
-    );
-    assert.equal(invalidDirectionRoom.projectiles.length, 0);
-
-    const invalidOriginRoom = new GameRoom("room-invalid-origin");
-    invalidOriginRoom.addPlayer(player(1));
-    assert.equal(invalidOriginRoom.setInput("1", {
-        ...invalidDirectionInput,
-        fireOriginX: 100,
-        fireDirectionZ: 1
-    }, 10_000), false);
-    assert.equal(invalidOriginRoom.projectiles.length, 0);
 });
 
 test("server-side projectiles destroy an enemy player's deployed drone", () => {
