@@ -102,8 +102,10 @@ CREATE TABLE IF NOT EXISTS rooms (
     server_id TEXT NOT NULL REFERENCES game_servers(id),
     status TEXT NOT NULL CHECK (status IN ('waiting', 'playing', 'complete')),
     max_players INTEGER NOT NULL CHECK (max_players BETWEEN 2 AND 32),
+    closed_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE rooms ADD COLUMN IF NOT EXISTS closed_reason TEXT;
 CREATE TABLE IF NOT EXISTS room_members (
     room_id BIGINT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
     user_id BIGINT NOT NULL REFERENCES users(id),
@@ -1217,6 +1219,15 @@ async function route(request, response) {
         if (method === "POST" && roomStateMatch) {
             const roomId = roomStateMatch[1];
             const action = roomStateMatch[2];
+            const reason = body.reason;
+            if (action !== "start" &&
+                (typeof reason !== "string" ||
+                    !/^[a-z0-9_:-]{1,64}$/.test(reason))) {
+                respond(response, 400, {
+                    error: "A valid room shutdown reason is required."
+                });
+                return;
+            }
             await withTransaction(async client => {
                 if (action === "start") {
                     await client.query(
@@ -1226,10 +1237,11 @@ async function route(request, response) {
                     );
                 } else {
                     await client.query(
-                        `UPDATE rooms SET status = 'complete'
+                        `UPDATE rooms SET status = 'complete',
+                                          closed_reason = $3
                          WHERE id = $1 AND server_id = $2
                            AND status IN ('waiting', 'playing')`,
-                        [roomId, body.serverId]
+                        [roomId, body.serverId, reason]
                     );
                     await client.query(
                         "DELETE FROM room_members WHERE room_id = $1",

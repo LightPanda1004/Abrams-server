@@ -61,11 +61,15 @@ connection with the ticket sent as the first WebSocket message, not in the URL.
 Room creation reserves a gateway before the owner connects. Retrying a join
 from the same account reissues its ticket without consuming another player
 slot; only the newest unused ticket remains valid. An assigned room with no
-connected players is released after 30 seconds; once a room has had a player,
-it is completed as soon as its last player disconnects. Fire inputs are
-one-shot press edges, so a held or duplicated input packet cannot fire again
-until the client reports a release. Authenticated gateway coordination traffic
-is isolated from player request limits.
+connected players is released after 30 seconds. A disconnected player remains
+in the authoritative room, with movement stopped, for the configurable
+reconnection grace period; successful ticket authentication in that interval
+resumes the existing player state. After the grace expires, the server removes
+the player and releases the database membership. A room with no remaining
+players is then completed. Fire inputs are one-shot press edges, so a held or
+duplicated input packet cannot fire again until the client reports a release.
+Authenticated gateway coordination traffic is isolated from player request
+limits.
 
 Configure these values in the same `.env` used by the API. For local
 development:
@@ -76,6 +80,7 @@ ABRAMS_ONLINE_SERVER_ID=local-01
 ABRAMS_ONLINE_WS_PUBLIC_URL=ws://localhost:7777/game
 ABRAMS_ONLINE_WS_PORT=7777
 ABRAMS_ONLINE_MAX_PLAYERS=32
+ABRAMS_ONLINE_RECONNECT_GRACE_MS=30000
 ```
 
 Keep `SERVER_API_TOKEN` identical for the API and gateway; never put it in the

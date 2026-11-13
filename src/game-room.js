@@ -70,6 +70,7 @@ class GameRoom {
             userId,
             playerName,
             team,
+            connected: true,
             x: spawnX,
             z: (teamPlayers - (this.capacity / 4)) * 6,
             heading: team === 1 ? 90 : -90,
@@ -110,7 +111,7 @@ class GameRoom {
         return this.snapshot();
     }
 
-    removePlayer(userId) {
+    removePlayer(userId, checkVictory = true) {
         const player = this.players.get(userId);
         if (!player) {
             return false;
@@ -120,7 +121,24 @@ class GameRoom {
             projectile => projectile.ownerId !== userId
         );
         this.pendingEvents.push({ type: "playerLeft", userId });
-        this.checkForVictory();
+        if (checkVictory)
+            this.checkForVictory();
+        return true;
+    }
+
+    setPlayerConnected(userId, connected) {
+        const player = this.players.get(userId);
+        if (!player || typeof connected !== "boolean")
+            return false;
+
+        player.connected = connected;
+        if (!connected) {
+            player.throttle = 0;
+            player.steering = 0;
+            player.speedBoostAmount = 0;
+            player.speed = 0;
+            player.fireInputPressed = false;
+        }
         return true;
     }
 
@@ -302,7 +320,7 @@ class GameRoom {
         }
 
         for (const player of this.players.values()) {
-            if (!player.alive)
+            if (!player.alive || !player.connected)
                 continue;
 
             const targetSpeed = player.throttle >= 0
@@ -361,6 +379,7 @@ class GameRoom {
                 userId: player.userId,
                 playerName: player.playerName,
                 team: player.team,
+                connected: player.connected,
                 x: round(player.x),
                 z: round(player.z),
                 heading: round(player.heading),
@@ -401,6 +420,7 @@ class GameRoom {
                 userId: player.userId,
                 playerName: player.playerName,
                 team: player.team,
+                connected: player.connected,
                 x: round(player.x),
                 z: round(player.z),
                 heading: round(player.heading),

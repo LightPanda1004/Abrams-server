@@ -53,6 +53,7 @@ test("gateway rejects loopback public endpoint without explicit local opt-in", (
         "ABRAMS_ONLINE_ALLOW_LOCAL_WS_URL",
         "ABRAMS_ONLINE_WS_PORT",
         "ABRAMS_ONLINE_MAX_PLAYERS",
+        "ABRAMS_ONLINE_RECONNECT_GRACE_MS",
         "SERVER_API_TOKEN",
         "NODE_ENV"
     ];
@@ -69,6 +70,7 @@ test("gateway rejects loopback public endpoint without explicit local opt-in", (
         delete process.env.ABRAMS_ONLINE_ALLOW_LOCAL_WS_URL;
         process.env.ABRAMS_ONLINE_WS_PORT = "7777";
         process.env.ABRAMS_ONLINE_MAX_PLAYERS = "32";
+        delete process.env.ABRAMS_ONLINE_RECONNECT_GRACE_MS;
         process.env.SERVER_API_TOKEN =
             "test-server-token-that-is-long-enough";
         delete process.env.NODE_ENV;
@@ -82,6 +84,7 @@ test("gateway rejects loopback public endpoint without explicit local opt-in", (
             getConfig().publicWsUrl,
             "ws://127.0.0.1:7777/game"
         );
+        assert.equal(getConfig().reconnectGraceMs, 30_000);
     } finally {
         for (const [key, value] of originalValues) {
             if (value === undefined)
@@ -100,8 +103,8 @@ test(
         let ticketValidations = 0;
         let roomCompletions = 0;
         let registration;
-        let resolveMemberLeave;
         let resolveRoomCompletion;
+        let resolveMemberLeave;
         const memberLeaveCompleted = new Promise(resolve => {
             resolveMemberLeave = resolve;
         });
@@ -136,14 +139,24 @@ test(
                 return;
             }
             if (request.url.endsWith("/leave")) {
+                request.resume();
                 respond(response, 200, {});
                 resolveMemberLeave();
                 return;
             }
             if (request.url.endsWith("/complete")) {
-                roomCompletions++;
-                respond(response, 200, {});
-                resolveRoomCompletion();
+                const chunks = [];
+                request.on("data", chunk => chunks.push(chunk));
+                request.on("end", () => {
+                    roomCompletions++;
+                    assert.equal(
+                        JSON.parse(Buffer.concat(chunks).toString("utf8"))
+                            .reason,
+                        "reconnect_grace_expired_empty"
+                    );
+                    respond(response, 200, {});
+                    resolveRoomCompletion();
+                });
                 return;
             }
             respond(response, 200, {});
@@ -158,6 +171,7 @@ test(
             publicWsUrl: "ws://127.0.0.1:7777/game",
             port: 0,
             maxPlayers: 32,
+            reconnectGraceMs: 200,
             serverToken: "test-server-token-that-is-long-enough"
         });
         let gatewayStarted = false;
@@ -170,7 +184,6 @@ test(
             }
             if (gatewayStarted) {
                 await gateway.stop();
-                await memberLeaveCompleted;
             }
             await new Promise(resolve => api.close(resolve));
         });
@@ -189,18 +202,53 @@ test(
         clients.push(first.socket);
         assert.equal((await first.authenticated).type, "authenticated");
         assert.ok(assignmentPolls >= 2);
+        const firstPosition = first.authenticated.then(state => {
+            const initialX = state.snapshot.players[0].x;
+            const moved = new Promise((resolve, reject) => {
+                const timeout = setTimeout(
+                    () => reject(new Error("Tank did not move before disconnect.")),
+                    2000
+                );
+                const onMessage = raw => {
+                    const message = JSON.parse(raw.toString("utf8"));
+                    const current = message.players?.find(player =>
+                        player.userId === "123"
+                    );
+                    if (message.type !== "state" || !current ||
+                        current.x === initialX)
+                        return;
+                    clearTimeout(timeout);
+                    first.socket.off("message", onMessage);
+                    resolve(current.x);
+                };
+                first.socket.on("message", onMessage);
+            });
+            first.socket.send(JSON.stringify({
+                type: "input",
+                throttle: 1,
+                steering: 0,
+                fire: false
+            }));
+            return moved;
+        });
+        const movedX = await firstPosition;
         const firstClosed = once(first.socket, "close");
+        first.socket.close();
+        await firstClosed;
 
         const second = connectAndAuthenticate(
             url,
             "second-ticket-value-long-enough-123"
         );
         clients.push(second.socket);
-        assert.equal((await second.authenticated).type, "authenticated");
+        const reconnectedState = await second.authenticated;
+        assert.equal(reconnectedState.type, "authenticated");
+        assert.equal(reconnectedState.snapshot.players.length, 1);
+        assert.equal(reconnectedState.snapshot.players[0].userId, "123");
+        assert.equal(reconnectedState.snapshot.players[0].connected, true);
+        assert.equal(reconnectedState.snapshot.players[0].x, movedX);
         assert.equal(ticketValidations, 2);
 
-        const [closeCode] = await firstClosed;
-        assert.equal(closeCode, 4004);
         second.socket.close();
         await roomCompletion;
         assert.equal(roomCompletions, 1);
@@ -260,6 +308,7 @@ test(
             publicWsUrl: "ws://127.0.0.1:7777/game",
             port: 0,
             maxPlayers: 32,
+            reconnectGraceMs: 0,
             serverToken: "test-server-token-that-is-long-enough"
         });
         let gatewayStarted = false;
@@ -395,6 +444,7 @@ test(
             publicWsUrl: "ws://127.0.0.1:7777/game",
             port: 0,
             maxPlayers: 32,
+            reconnectGraceMs: 0,
             serverToken: "test-server-token-that-is-long-enough"
         });
         let gatewayStarted = false;

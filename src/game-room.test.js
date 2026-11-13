@@ -477,6 +477,54 @@ test("a disconnect after both teams join awards victory without AI replacement",
     assert.throws(() => room.addPlayer(player(3, 2)), /match has ended/);
 });
 
+test("a temporarily disconnected player remains in the room and stops moving", () => {
+    const room = new GameRoom("room-reconnect-grace");
+    room.addPlayer(player(1, 1));
+    room.addPlayer(player(2, 2));
+    room.setInput("2", {
+        throttle: 1,
+        steering: 0,
+        fire: false
+    });
+    room.tick(0.1);
+    const disconnectedPlayer = room.players.get("2");
+    const positionBeforeDisconnect = {
+        x: disconnectedPlayer.x,
+        z: disconnectedPlayer.z
+    };
+
+    assert.equal(room.setPlayerConnected("2", false), true);
+    assert.equal(room.snapshot().matchEnded, false);
+    assert.equal(room.snapshot().players.find(item =>
+        item.userId === "2"
+    ).connected, false);
+    room.tick(0.1);
+
+    assert.equal(room.players.has("2"), true);
+    assert.equal(disconnectedPlayer.x, positionBeforeDisconnect.x);
+    assert.equal(disconnectedPlayer.z, positionBeforeDisconnect.z);
+    assert.equal(disconnectedPlayer.speed, 0);
+
+    assert.equal(room.setPlayerConnected("2", true), true);
+    assert.equal(room.snapshot().players.find(item =>
+        item.userId === "2"
+    ).connected, true);
+    assert.equal(room.snapshot().matchEnded, false);
+});
+
+test("simultaneously expired disconnected teams resolve as a draw", () => {
+    const room = new GameRoom("room-disconnect-draw");
+    room.addPlayer(player(1, 1));
+    room.addPlayer(player(2, 2));
+
+    assert.equal(room.removePlayer("1", false), true);
+    assert.equal(room.removePlayer("2", false), true);
+    room.checkForVictory();
+
+    assert.equal(room.snapshot().matchEnded, true);
+    assert.equal(room.snapshot().winningTeam, 0);
+});
+
 test("a one-team lobby does not resolve a PvP result", () => {
     const room = new GameRoom("room-one-team-lobby");
     room.addPlayer(player(1, 1));
