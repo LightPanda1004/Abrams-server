@@ -117,7 +117,7 @@ test("online shell speed and reload match the Abrams single-player settings", ()
     assert.equal(initialEvent.cooldown, 3);
 
     const state = room.tick(0.05, 10_050);
-    assert.ok(Math.abs(state.projectiles[0].x + 13.5) < 0.001);
+    assert.ok(Math.abs(state.projectiles[0].x + 15.5) < 0.001);
 });
 
 test("online shell follows the reported muzzle position and straight-line velocity", () => {
@@ -133,6 +133,7 @@ test("online shell follows the reported muzzle position and straight-line veloci
         aimHeading: 0,
         aimPitch: 0,
         hasFireOrigin: true,
+        fireRequestId: 31,
         fireOriginX: shooter.x,
         fireOriginY: 2.5,
         fireOriginZ: shooter.z + 4.89,
@@ -144,10 +145,17 @@ test("online shell follows the reported muzzle position and straight-line veloci
 
     const state = room.tick(0.05, 10_050);
     const projectile = state.projectiles[0];
+    const fireEvent = state.events.find(event =>
+        event.type === "playerFired"
+    );
 
+    assert.equal(fireEvent.requestId, 31);
+    assert.equal(fireEvent.x, shooter.x);
+    assert.equal(fireEvent.y, 2.5);
+    assert.equal(fireEvent.z, shooter.z + 4.89);
     assert.ok(Math.abs(projectile.heading - 30) < 0.001);
     assert.ok(Math.abs(projectile.pitch + 10) < 0.001);
-    const distance = 160 * 0.05;
+    const distance = 120 * 0.05;
     assert.ok(Math.abs(
         projectile.x -
         (shooter.x + Math.sin(muzzleHeading) *
@@ -665,6 +673,41 @@ test("one fire press creates one projectile until the button is released", () =>
     assert.equal(state.events.filter(event => event.type === "playerFired").length, 2);
 });
 
+test("fire confirmations correlate requests and reject shots during reload", () => {
+    const room = new GameRoom("room-fire-request-correlation");
+    room.addPlayer(player(1));
+
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        fireRequestId: 51
+    }, 10_000);
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: false,
+        fireRequestId: 0
+    }, 10_001);
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        fireRequestId: 52
+    }, 11_000);
+
+    assert.equal(room.projectiles.length, 1);
+    const accepted = room.pendingEvents.find(event =>
+        event.type === "playerFired"
+    );
+    const rejected = room.pendingEvents.find(event =>
+        event.type === "fireRejected"
+    );
+    assert.equal(accepted.requestId, 51);
+    assert.equal(rejected.requestId, 52);
+    assert.equal(rejected.cooldown, 2);
+});
+
 test("projectile expiry does not create another shot while fire stays held", () => {
     const room = new GameRoom("room-fire-expiry");
     room.addPlayer(player(1));
@@ -676,16 +719,16 @@ test("projectile expiry does not create another shot while fire stays held", () 
 
     room.setInput("1", input, 10_000);
     assert.equal(room.projectiles.length, 1);
-    for (let tick = 0; tick < 50; tick++) {
+    for (let tick = 0; tick < 67; tick++) {
         room.tick(0.1, 10_100 + tick * 100);
     }
 
     assert.equal(room.projectiles.length, 0);
-    assert.equal(room.setInput("1", input, 15_100), true);
+    assert.equal(room.setInput("1", input, 16_800), true);
     assert.equal(room.projectiles.length, 0);
 
-    room.setInput("1", { ...input, fire: false }, 15_101);
-    room.setInput("1", input, 15_102);
+    room.setInput("1", { ...input, fire: false }, 16_801);
+    room.setInput("1", input, 16_802);
     assert.equal(room.projectiles.length, 1);
     assert.equal(room.projectiles[0].id, 2);
 });

@@ -17,7 +17,7 @@ const REVERSE_SPEED = 3;
 const ACCELERATION = 2;
 const DECELERATION = 3;
 const TURN_SPEED = 45;
-const PROJECTILE_SPEED = 160;
+const PROJECTILE_SPEED = 120;
 const PROJECTILE_DAMAGE = 25;
 const PROJECTILE_RANGE = 800;
 const FIRE_COOLDOWN_MS = 3000;
@@ -149,6 +149,9 @@ class GameRoom {
             typeof input.throttle !== "number" ||
             typeof input.steering !== "number" ||
             typeof input.fire !== "boolean" ||
+            (input.fireRequestId !== undefined &&
+                (!Number.isSafeInteger(input.fireRequestId) ||
+                    input.fireRequestId < 0)) ||
             !Number.isFinite(input.throttle) ||
             !Number.isFinite(input.steering) ||
             (input.speedBoostAmount !== undefined &&
@@ -305,8 +308,26 @@ class GameRoom {
             this.pendingEvents.push({
                 type: "playerFired",
                 userId,
+                requestId: input.fireRequestId || 0,
                 projectileId: projectile.id,
-                cooldown: FIRE_COOLDOWN_MS / 1000
+                cooldown: FIRE_COOLDOWN_MS / 1000,
+                x: projectile.x,
+                y: projectile.y,
+                z: projectile.z,
+                heading: projectile.heading,
+                pitch: projectile.pitch
+            });
+        } else if (firePressed && input.fireRequestId > 0) {
+            this.pendingEvents.push({
+                type: "fireRejected",
+                userId,
+                requestId: input.fireRequestId,
+                cooldown: player.alive
+                    ? Math.max(
+                        0,
+                        FIRE_COOLDOWN_MS - (now - player.lastFireAt)
+                    ) / 1000
+                    : 0
             });
         }
         return true;
