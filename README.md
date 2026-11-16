@@ -200,15 +200,15 @@ Set `BLOCKCHAIN_RPC_URL`, `BLOCKCHAIN_CHAIN_ID`,
 `TANK_COIN_CONTRACT_ADDRESS`, and `TANK_GAME_CONTRACT_ADDRESS` in `.env`, and
 set `GAME_SERVER_PRIVATE_KEY` to a dedicated backend signer key. Configure
 Ethereum Sepolia with chain ID `11155111` and
-`https://ethereum-sepolia-rpc.publicnode.com`. The supplied TankGame address
-has bytecode on Ethereum Sepolia and points to the supplied TankCoin address,
-but that TankCoin address has no bytecode there. Deploy TankCoin and deploy
-TankGame with the deployed TankCoin address, then update `.env` and the Unity
-GameDirector contract-address fields before using the economy or battle
-rewards. Grant
-that signer `GAME_SERVER_ROLE` on
-`TankGame`; also grant the `TankGame` contract `MINTER_ROLE` and `GAME_ROLE` on
-`TankCoin`. Keep the signer key private and never put it in a Unity client.
+`https://ethereum-sepolia-rpc.publicnode.com`. The previously configured
+TankGame has an immutable reference to a TankCoin address with no bytecode, so
+deploy a new TankCoin and TankGame pair before using the economy or battle
+rewards. Follow [`../contract/DEPLOYMENT.md`](../contract/DEPLOYMENT.md) and
+copy the real addresses from `contract/deployments/sepolia.json` into this
+local `.env` and Unity's `GameDirector` component. The deployment assigns
+`MINTER_ROLE` and `GAME_ROLE` to TankGame and only `GAME_SERVER_ROLE` to the
+backend signer; the backend signer must not be a contract admin or token
+minter. Keep the signer key private and never put it in a Unity client.
 
 After independently verifying a battle result, a trusted dedicated server can
 call `POST /api/server/rewards` with `X-Server-Token` and JSON fields
