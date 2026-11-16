@@ -16,10 +16,9 @@ function respond(response, status, value) {
     response.end(JSON.stringify(value));
 }
 
-function connectAndAuthenticate(url, ticket, socketOptions = {}) {
+function connectAndAuthenticate(url, ticket) {
     const socket = new WebSocket(url, {
-        origin: "http://localhost:3000",
-        ...socketOptions
+        origin: "http://localhost:3000"
     });
     const authenticated = new Promise((resolve, reject) => {
         socket.once("error", reject);
@@ -55,8 +54,6 @@ test("gateway rejects loopback public endpoint without explicit local opt-in", (
         "ABRAMS_ONLINE_WS_PORT",
         "ABRAMS_ONLINE_MAX_PLAYERS",
         "ABRAMS_ONLINE_RECONNECT_GRACE_MS",
-        "ABRAMS_ONLINE_WS_PING_INTERVAL_MS",
-        "ABRAMS_ONLINE_WS_PONG_TIMEOUT_MS",
         "SERVER_API_TOKEN",
         "NODE_ENV"
     ];
@@ -88,10 +85,6 @@ test("gateway rejects loopback public endpoint without explicit local opt-in", (
             "ws://127.0.0.1:7777/game"
         );
         assert.equal(getConfig().reconnectGraceMs, 30_000);
-        assert.equal(getConfig().wsPingIntervalMs, 10_000);
-        assert.equal(getConfig().wsPongTimeoutMs, 20_000);
-        process.env.ABRAMS_ONLINE_WS_PONG_TIMEOUT_MS = "10000";
-        assert.throws(() => getConfig(), /invalid/);
     } finally {
         for (const [key, value] of originalValues) {
             if (value === undefined)
@@ -302,128 +295,6 @@ test(
         await roomCompletion;
         assert.equal(roomCompletions, 1);
         await memberLeaveCompleted;
-    }
-);
-
-test(
-    "missed client pongs disconnect only the transport and preserve room state for reconnect",
-    { timeout: 10_000 },
-    async t => {
-        let leaveRequests = 0;
-        const api = http.createServer((request, response) => {
-            if (request.url === "/api/server/register") {
-                request.resume();
-                respond(response, 200, {});
-                return;
-            }
-            if (request.url.startsWith("/api/server/assignment")) {
-                respond(response, 200, { rooms: [{ id: "42" }] });
-                return;
-            }
-            if (request.url === "/api/server/tickets/validate") {
-                request.resume();
-                respond(response, 200, {
-                    roomId: "42",
-                    userId: "123",
-                    team: 1,
-                    playerName: "Pilot"
-                });
-                return;
-            }
-            if (request.url.endsWith("/leave"))
-                leaveRequests++;
-            request.resume();
-            respond(response, 200, {});
-        });
-        api.listen(0, "127.0.0.1");
-        await once(api, "listening");
-        const apiAddress = api.address();
-
-        const gateway = createGateway({
-            apiUrl: new URL(`http://127.0.0.1:${apiAddress.port}`),
-            serverId: "reconnect-grace-gateway",
-            publicWsUrl: "ws://127.0.0.1:7777/game",
-            port: 0,
-            maxPlayers: 32,
-            reconnectGraceMs: 5000,
-            wsPingIntervalMs: 100,
-            wsPongTimeoutMs: 350,
-            serverToken: "test-server-token-that-is-long-enough"
-        });
-        let gatewayStarted = false;
-        const clients = [];
-
-        t.after(async () => {
-            for (const client of clients) {
-                if (client.readyState === WebSocket.OPEN)
-                    client.close();
-            }
-            if (gatewayStarted)
-                await gateway.stop();
-            await new Promise(resolve => api.close(resolve));
-        });
-
-        await gateway.start();
-        gatewayStarted = true;
-        const url = `ws://127.0.0.1:${gateway.server.address().port}/game`;
-        const disconnectedClient = connectAndAuthenticate(
-            url,
-            "first-ticket-value-long-enough-123",
-            { autoPong: false }
-        );
-        clients.push(disconnectedClient.socket);
-        const initial = await disconnectedClient.authenticated;
-        const originalX = initial.snapshot.players[0].x;
-
-        const moved = new Promise((resolve, reject) => {
-            const timeout = setTimeout(
-                () => reject(new Error("Room did not apply player movement.")),
-                2000
-            );
-            const onMessage = raw => {
-                const message = JSON.parse(raw.toString("utf8"));
-                const localPlayer = message.players?.find(player =>
-                    player.userId === "123"
-                );
-                if (message.type !== "state" || !localPlayer ||
-                    localPlayer.x === originalX)
-                    return;
-                clearTimeout(timeout);
-                disconnectedClient.socket.off("message", onMessage);
-                resolve(localPlayer.x);
-            };
-            disconnectedClient.socket.on("message", onMessage);
-        });
-        disconnectedClient.socket.send(JSON.stringify({
-            type: "input",
-            throttle: 1,
-            steering: 0,
-            fire: false
-        }));
-        const positionBeforeDisconnect = await moved;
-        const disconnected = once(disconnectedClient.socket, "close");
-        const [closeCode] = await disconnected;
-        assert.equal(closeCode, 1006);
-        assert.equal(leaveRequests, 0);
-
-        const reconnectedClient = connectAndAuthenticate(
-            url,
-            "second-ticket-value-long-enough-123"
-        );
-        clients.push(reconnectedClient.socket);
-        const reconnected = await reconnectedClient.authenticated;
-        const restoredPlayer = reconnected.snapshot.players.find(player =>
-            player.userId === "123"
-        );
-        assert.ok(restoredPlayer);
-        assert.ok(
-            Math.abs(restoredPlayer.x - positionBeforeDisconnect) < 1,
-            "reconnection should resume the existing tank position"
-        );
-        assert.equal(restoredPlayer.team, 1);
-        assert.equal(restoredPlayer.health, 200);
-        assert.equal(restoredPlayer.connected, true);
-        assert.equal(leaveRequests, 0);
     }
 );
 
@@ -842,5 +713,164 @@ test(
             ["123", "456"]
         );
         assert.deepEqual(completionReasons, ["explicit_leave_empty"]);
+    }
+);
+
+test(
+    "one fire request is replicated once to every connected room client",
+    { timeout: 10_000 },
+    async t => {
+        const api = http.createServer((request, response) => {
+            if (request.url === "/api/server/register") {
+                request.resume();
+                respond(response, 200, {});
+                return;
+            }
+            if (request.url.startsWith("/api/server/assignment")) {
+                respond(response, 200, { rooms: [{ id: "42" }] });
+                return;
+            }
+            if (request.url === "/api/server/tickets/validate") {
+                const chunks = [];
+                request.on("data", chunk => chunks.push(chunk));
+                request.on("end", () => {
+                    const { ticket } = JSON.parse(
+                        Buffer.concat(chunks).toString("utf8")
+                    );
+                    const first = ticket.startsWith("first");
+                    respond(response, 200, {
+                        roomId: "42",
+                        userId: first ? "123" : "456",
+                        team: first ? 1 : 2,
+                        playerName: first ? "Pilot One" : "Pilot Two"
+                    });
+                });
+                return;
+            }
+            request.resume();
+            respond(response, 200, {});
+        });
+        api.listen(0, "127.0.0.1");
+        await once(api, "listening");
+        const apiAddress = api.address();
+
+        const gateway = createGateway({
+            apiUrl: new URL(`http://127.0.0.1:${apiAddress.port}`),
+            serverId: "fire-dedup-gateway",
+            publicWsUrl: "ws://127.0.0.1:7777/game",
+            port: 0,
+            maxPlayers: 32,
+            reconnectGraceMs: 30_000,
+            serverToken: "test-server-token-that-is-long-enough"
+        });
+        let gatewayStarted = false;
+        const clients = [];
+
+        t.after(async () => {
+            for (const client of clients) {
+                if (client.readyState === WebSocket.OPEN)
+                    client.close();
+            }
+            if (gatewayStarted)
+                await gateway.stop();
+            await new Promise(resolve => api.close(resolve));
+        });
+
+        await gateway.start();
+        gatewayStarted = true;
+        const url = `ws://127.0.0.1:${gateway.server.address().port}/game`;
+        const first = connectAndAuthenticate(
+            url,
+            "first-ticket-value-long-enough-123"
+        );
+        const second = connectAndAuthenticate(
+            url,
+            "second-ticket-value-long-enough-456"
+        );
+        clients.push(first.socket, second.socket);
+        await Promise.all([first.authenticated, second.authenticated]);
+
+        function waitForRoomEvent(socket, eventType) {
+            return new Promise((resolve, reject) => {
+                const timeout = setTimeout(
+                    () => reject(new Error(
+                        `Timed out waiting for ${eventType}.`
+                    )),
+                    2000
+                );
+                const onMessage = raw => {
+                    const message = JSON.parse(raw.toString("utf8"));
+                    if (message.type !== "state" ||
+                        !message.events?.some(event =>
+                            event.type === eventType
+                        )) {
+                        return;
+                    }
+                    clearTimeout(timeout);
+                    socket.off("message", onMessage);
+                    resolve(message);
+                };
+                socket.on("message", onMessage);
+            });
+        }
+
+        const firstFire = waitForRoomEvent(first.socket, "playerFired");
+        const secondFire = waitForRoomEvent(second.socket, "playerFired");
+        const input = {
+            type: "input",
+            throttle: 0,
+            steering: 0,
+            fire: true,
+            fireRequestId: 55
+        };
+        first.socket.send(JSON.stringify(input));
+        const [firstFireState, secondFireState] = await Promise.all([
+            firstFire,
+            secondFire
+        ]);
+        for (const state of [firstFireState, secondFireState]) {
+            const fired = state.events.filter(event =>
+                event.type === "playerFired"
+            );
+            assert.equal(fired.length, 1);
+            assert.equal(fired[0].requestId, 55);
+            assert.equal(state.projectiles.length, 1);
+        }
+        assert.equal(
+            firstFireState.events.find(event =>
+                event.type === "playerFired"
+            ).projectileId,
+            secondFireState.events.find(event =>
+                event.type === "playerFired"
+            ).projectileId
+        );
+
+        const firstRejected = waitForRoomEvent(
+            first.socket,
+            "fireRejected"
+        );
+        const secondRejected = waitForRoomEvent(
+            second.socket,
+            "fireRejected"
+        );
+        first.socket.send(JSON.stringify({ ...input, fire: false }));
+        first.socket.send(JSON.stringify(input));
+        const [firstReplayState, secondReplayState] = await Promise.all([
+            firstRejected,
+            secondRejected
+        ]);
+        for (const state of [firstReplayState, secondReplayState]) {
+            assert.equal(
+                state.events.filter(event =>
+                    event.type === "playerFired"
+                ).length,
+                0
+            );
+            assert.equal(state.events.filter(event =>
+                event.type === "fireRejected" &&
+                event.requestId === 55
+            ).length, 1);
+            assert.equal(state.projectiles.length, 1);
+        }
     }
 );

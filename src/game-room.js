@@ -40,8 +40,6 @@ class GameRoom {
         this.capacity = capacity;
         this.players = new Map();
         this.projectiles = [];
-        this.projectileScratch = [];
-        this.activePlayersScratch = [];
         this.pendingEvents = [];
         this.nextProjectileId = 1;
         this.matchStarted = false;
@@ -600,13 +598,13 @@ class GameRoom {
     }
 
     advanceProjectiles(delta) {
-        const remaining = this.projectileScratch;
-        remaining.length = 0;
-        const previousPosition = { x: 0, y: 0, z: 0 };
+        const remaining = [];
         for (const projectile of this.projectiles) {
-            previousPosition.x = projectile.x;
-            previousPosition.y = projectile.y;
-            previousPosition.z = projectile.z;
+            const previousPosition = {
+                x: projectile.x,
+                y: projectile.y,
+                z: projectile.z
+            };
             const distance = PROJECTILE_SPEED * delta;
             projectile.x += projectile.directionX * distance;
             projectile.y += projectile.directionY * distance;
@@ -623,6 +621,13 @@ class GameRoom {
                 segmentX * segmentX +
                 segmentY * segmentY +
                 segmentZ * segmentZ;
+            const getSegmentFraction = contact =>
+                segmentLengthSquared > 0
+                    ? ((contact.x - previousPosition.x) * segmentX +
+                        (contact.y - previousPosition.y) * segmentY +
+                        (contact.z - previousPosition.z) * segmentZ) /
+                        segmentLengthSquared
+                    : 0;
             let droneTarget = null;
             for (const player of this.players.values()) {
                 if (!player.alive || player.userId === projectile.ownerId)
@@ -633,12 +638,7 @@ class GameRoom {
                     player
                 );
                 if (contact) {
-                    const fraction = segmentLengthSquared > 0
-                        ? ((contact.x - previousPosition.x) * segmentX +
-                            (contact.y - previousPosition.y) * segmentY +
-                            (contact.z - previousPosition.z) * segmentZ) /
-                            segmentLengthSquared
-                        : 0;
+                    const fraction = getSegmentFraction(contact);
                     if (fraction < targetFraction) {
                         target = player;
                         droneTarget = null;
@@ -656,18 +656,15 @@ class GameRoom {
                 const contact = getSegmentSphereContact(
                     previousPosition,
                     projectile,
-                    player.droneX,
-                    player.droneY,
-                    player.droneZ,
+                    {
+                        x: player.droneX,
+                        y: player.droneY,
+                        z: player.droneZ
+                    },
                     2.5
                 );
                 if (contact) {
-                    const fraction = segmentLengthSquared > 0
-                        ? ((contact.x - previousPosition.x) * segmentX +
-                            (contact.y - previousPosition.y) * segmentY +
-                            (contact.z - previousPosition.z) * segmentZ) /
-                            segmentLengthSquared
-                        : 0;
+                    const fraction = getSegmentFraction(contact);
                     if (fraction < targetFraction) {
                         target = null;
                         droneTarget = player;
@@ -726,17 +723,13 @@ class GameRoom {
                 remaining.push(projectile);
             }
         }
-        this.projectileScratch = this.projectiles;
         this.projectiles = remaining;
     }
 
     resolveTankCollisions() {
-        const players = this.activePlayersScratch;
-        players.length = 0;
-        for (const player of this.players.values()) {
-            if (player.alive)
-                players.push(player);
-        }
+        const players = [...this.players.values()].filter(player =>
+            player.alive
+        );
         for (let pass = 0; pass < 2; pass++) {
             for (let leftIndex = 0; leftIndex < players.length; leftIndex++) {
                 for (let rightIndex = leftIndex + 1;
@@ -757,16 +750,12 @@ class GameRoom {
                 owner.droneDestroyed) {
                 continue;
             }
-            let target = null;
-            for (const player of this.players.values()) {
-                if (player.alive &&
-                    player.userId !== owner.userId &&
-                    player.team !== owner.team &&
-                    tankIntersectsDrone(player, owner)) {
-                    target = player;
-                    break;
-                }
-            }
+            const target = [...this.players.values()].find(player =>
+                player.alive &&
+                player.userId !== owner.userId &&
+                player.team !== owner.team &&
+                tankIntersectsDrone(player, owner)
+            );
             if (!target)
                 continue;
 
@@ -813,16 +802,18 @@ class GameRoom {
         if (!this.matchStarted || this.matchEnded)
             return;
 
-        let livingTeams = 0;
-        for (const player of this.players.values()) {
-            if (player.alive)
-                livingTeams |= player.team === 1 ? 1 : 2;
-        }
-        if (livingTeams === 3)
+        const livingTeams = new Set(
+            [...this.players.values()]
+                .filter(player => player.alive)
+                .map(player => player.team)
+        );
+        if (livingTeams.size === 2)
             return;
 
         this.matchEnded = true;
-        this.winningTeam = livingTeams === 1 ? 1 : livingTeams === 2 ? 2 : 0;
+        this.winningTeam = livingTeams.size === 1
+            ? [...livingTeams][0]
+            : 0;
         this.pendingEvents.push({
             type: "matchEnded",
             winningTeam: this.winningTeam,
@@ -831,104 +822,67 @@ class GameRoom {
     }
 }
 
+function tankAxes(tank) {
+    const radians = tank.heading * Math.PI / 180;
+    return {
+        forward: { x: Math.sin(radians), z: Math.cos(radians) },
+        right: { x: Math.cos(radians), z: -Math.sin(radians) }
+    };
+}
+
+function dot2(left, right) {
+    return left.x * right.x + left.z * right.z;
+}
+
+function tankProjectionRadius(tank, axis) {
+    const axes = tankAxes(tank);
+    return TANK_HALF_LENGTH * Math.abs(dot2(axes.forward, axis)) +
+        TANK_HALF_WIDTH * Math.abs(dot2(axes.right, axis));
+}
+
 function separateTankBodies(left, right) {
-    const deltaX = right.x - left.x;
-    const deltaZ = right.z - left.z;
-    const leftRadians = left.heading * Math.PI / 180;
-    const leftForwardX = Math.sin(leftRadians);
-    const leftForwardZ = Math.cos(leftRadians);
-    const leftRightX = Math.cos(leftRadians);
-    const leftRightZ = -Math.sin(leftRadians);
-    const rightRadians = right.heading * Math.PI / 180;
-    const rightForwardX = Math.sin(rightRadians);
-    const rightForwardZ = Math.cos(rightRadians);
-    const rightRightX = Math.cos(rightRadians);
-    const rightRightZ = -Math.sin(rightRadians);
+    const delta = { x: right.x - left.x, z: right.z - left.z };
+    const leftAxes = tankAxes(left);
+    const rightAxes = tankAxes(right);
+    const axes = [
+        leftAxes.forward,
+        leftAxes.right,
+        rightAxes.forward,
+        rightAxes.right
+    ];
     let minimumOverlap = Number.POSITIVE_INFINITY;
-    let separationAxisX = 0;
-    let separationAxisZ = 0;
-    let overlap = TANK_HALF_LENGTH +
-        TANK_HALF_LENGTH * Math.abs(
-            rightForwardX * leftForwardX + rightForwardZ * leftForwardZ
-        ) +
-        TANK_HALF_WIDTH * Math.abs(
-            rightRightX * leftForwardX + rightRightZ * leftForwardZ
-        ) -
-        Math.abs(deltaX * leftForwardX + deltaZ * leftForwardZ);
-    if (overlap <= 0)
-        return;
-    minimumOverlap = overlap;
-    separationAxisX = leftForwardX;
-    separationAxisZ = leftForwardZ;
-
-    overlap = TANK_HALF_WIDTH +
-        TANK_HALF_LENGTH * Math.abs(
-            rightForwardX * leftRightX + rightForwardZ * leftRightZ
-        ) +
-        TANK_HALF_WIDTH * Math.abs(
-            rightRightX * leftRightX + rightRightZ * leftRightZ
-        ) -
-        Math.abs(deltaX * leftRightX + deltaZ * leftRightZ);
-    if (overlap <= 0)
-        return;
-    if (overlap < minimumOverlap) {
-        minimumOverlap = overlap;
-        separationAxisX = leftRightX;
-        separationAxisZ = leftRightZ;
+    let separationAxis = null;
+    for (const axis of axes) {
+        const overlap = tankProjectionRadius(left, axis) +
+            tankProjectionRadius(right, axis) -
+            Math.abs(dot2(delta, axis));
+        if (overlap <= 0)
+            return;
+        if (overlap < minimumOverlap) {
+            minimumOverlap = overlap;
+            separationAxis = axis;
+        }
     }
 
-    overlap = TANK_HALF_LENGTH +
-        TANK_HALF_LENGTH * Math.abs(
-            leftForwardX * rightForwardX + leftForwardZ * rightForwardZ
-        ) +
-        TANK_HALF_WIDTH * Math.abs(
-            leftRightX * rightForwardX + leftRightZ * rightForwardZ
-        ) -
-        Math.abs(deltaX * rightForwardX + deltaZ * rightForwardZ);
-    if (overlap <= 0)
-        return;
-    if (overlap < minimumOverlap) {
-        minimumOverlap = overlap;
-        separationAxisX = rightForwardX;
-        separationAxisZ = rightForwardZ;
-    }
-
-    overlap = TANK_HALF_WIDTH +
-        TANK_HALF_LENGTH * Math.abs(
-            leftForwardX * rightRightX + leftForwardZ * rightRightZ
-        ) +
-        TANK_HALF_WIDTH * Math.abs(
-            leftRightX * rightRightX + leftRightZ * rightRightZ
-        ) -
-        Math.abs(deltaX * rightRightX + deltaZ * rightRightZ);
-    if (overlap <= 0)
-        return;
-    if (overlap < minimumOverlap) {
-        minimumOverlap = overlap;
-        separationAxisX = rightRightX;
-        separationAxisZ = rightRightZ;
-    }
-
-    const direction = deltaX * separationAxisX +
-        deltaZ * separationAxisZ >= 0 ? 1 : -1;
+    const direction = dot2(delta, separationAxis) >= 0 ? 1 : -1;
     const offset = minimumOverlap * 0.5 + 0.001;
     left.x = clamp(
-        left.x - separationAxisX * direction * offset,
+        left.x - separationAxis.x * direction * offset,
         -MAX_WORLD_COORDINATE,
         MAX_WORLD_COORDINATE
     );
     left.z = clamp(
-        left.z - separationAxisZ * direction * offset,
+        left.z - separationAxis.z * direction * offset,
         -MAX_WORLD_COORDINATE,
         MAX_WORLD_COORDINATE
     );
     right.x = clamp(
-        right.x + separationAxisX * direction * offset,
+        right.x + separationAxis.x * direction * offset,
         -MAX_WORLD_COORDINATE,
         MAX_WORLD_COORDINATE
     );
     right.z = clamp(
-        right.z + separationAxisZ * direction * offset,
+        right.z + separationAxis.z * direction * offset,
         -MAX_WORLD_COORDINATE,
         MAX_WORLD_COORDINATE
     );
@@ -937,73 +891,50 @@ function separateTankBodies(left, right) {
 }
 
 function getTankSegmentContact(start, end, tank) {
-    const radians = tank.heading * Math.PI / 180;
-    const forwardX = Math.sin(radians);
-    const forwardZ = Math.cos(radians);
-    const rightX = Math.cos(radians);
-    const rightZ = -Math.sin(radians);
-    const startDeltaX = start.x - tank.x;
-    const startDeltaZ = start.z - tank.z;
-    const endDeltaX = end.x - tank.x;
-    const endDeltaZ = end.z - tank.z;
-    const startForward = startDeltaX * forwardX +
-        startDeltaZ * forwardZ;
-    const endForward = endDeltaX * forwardX + endDeltaZ * forwardZ;
-    const startRight = startDeltaX * rightX + startDeltaZ * rightZ;
-    const endRight = endDeltaX * rightX + endDeltaZ * rightZ;
+    const axes = tankAxes(tank);
+    const startDelta = {
+        x: start.x - tank.x,
+        z: start.z - tank.z
+    };
+    const endDelta = {
+        x: end.x - tank.x,
+        z: end.z - tank.z
+    };
+    const startLocal = [
+        dot2(startDelta, axes.forward),
+        dot2(startDelta, axes.right),
+        start.y
+    ];
+    const endLocal = [
+        dot2(endDelta, axes.forward),
+        dot2(endDelta, axes.right),
+        end.y
+    ];
+    const minimum = [
+        -TANK_HALF_LENGTH - 0.35,
+        -TANK_HALF_WIDTH - 0.35,
+        -0.25
+    ];
+    const maximum = [
+        TANK_HALF_LENGTH + 0.35,
+        TANK_HALF_WIDTH + 0.35,
+        TANK_COLLIDER_HEIGHT + 0.25
+    ];
     let entry = 0;
     let exit = 1;
-    let direction = endForward - startForward;
-    if (Math.abs(direction) < 0.000001) {
-        if (startForward < -TANK_HALF_LENGTH - 0.35 ||
-            startForward > TANK_HALF_LENGTH + 0.35)
-            return null;
-    } else {
-        let near = (-TANK_HALF_LENGTH - 0.35 - startForward) / direction;
-        let far = (TANK_HALF_LENGTH + 0.35 - startForward) / direction;
-        if (near > far) {
-            const swap = near;
-            near = far;
-            far = swap;
+    for (let axis = 0; axis < startLocal.length; axis++) {
+        const direction = endLocal[axis] - startLocal[axis];
+        if (Math.abs(direction) < 0.000001) {
+            if (startLocal[axis] < minimum[axis] ||
+                startLocal[axis] > maximum[axis]) {
+                return null;
+            }
+            continue;
         }
-        entry = Math.max(entry, near);
-        exit = Math.min(exit, far);
-        if (entry > exit)
-            return null;
-    }
-
-    direction = endRight - startRight;
-    if (Math.abs(direction) < 0.000001) {
-        if (startRight < -TANK_HALF_WIDTH - 0.35 ||
-            startRight > TANK_HALF_WIDTH + 0.35)
-            return null;
-    } else {
-        let near = (-TANK_HALF_WIDTH - 0.35 - startRight) / direction;
-        let far = (TANK_HALF_WIDTH + 0.35 - startRight) / direction;
-        if (near > far) {
-            const swap = near;
-            near = far;
-            far = swap;
-        }
-        entry = Math.max(entry, near);
-        exit = Math.min(exit, far);
-        if (entry > exit)
-            return null;
-    }
-
-    direction = end.y - start.y;
-    if (Math.abs(direction) < 0.000001) {
-        if (start.y < -0.25 ||
-            start.y > TANK_COLLIDER_HEIGHT + 0.25)
-            return null;
-    } else {
-        let near = (-0.25 - start.y) / direction;
-        let far = (TANK_COLLIDER_HEIGHT + 0.25 - start.y) / direction;
-        if (near > far) {
-            const swap = near;
-            near = far;
-            far = swap;
-        }
+        let near = (minimum[axis] - startLocal[axis]) / direction;
+        let far = (maximum[axis] - startLocal[axis]) / direction;
+        if (near > far)
+            [near, far] = [far, near];
         entry = Math.max(entry, near);
         exit = Math.min(exit, far);
         if (entry > exit)
@@ -1019,15 +950,13 @@ function getTankSegmentContact(start, end, tank) {
 }
 
 function tankIntersectsDrone(tank, droneOwner) {
-    const radians = tank.heading * Math.PI / 180;
-    const forwardX = Math.sin(radians);
-    const forwardZ = Math.cos(radians);
-    const rightX = Math.cos(radians);
-    const rightZ = -Math.sin(radians);
-    const deltaX = droneOwner.droneX - tank.x;
-    const deltaZ = droneOwner.droneZ - tank.z;
-    const localForward = deltaX * forwardX + deltaZ * forwardZ;
-    const localRight = deltaX * rightX + deltaZ * rightZ;
+    const axes = tankAxes(tank);
+    const delta = {
+        x: droneOwner.droneX - tank.x,
+        z: droneOwner.droneZ - tank.z
+    };
+    const localForward = dot2(delta, axes.forward);
+    const localRight = dot2(delta, axes.right);
     const closestForward = clamp(
         localForward,
         -TANK_HALF_LENGTH,
@@ -1046,31 +975,33 @@ function tankIntersectsDrone(tank, droneOwner) {
         DRONE_COLLISION_RADIUS * DRONE_COLLISION_RADIUS;
 }
 
-function getSegmentSphereContact(start, end, centerX, centerY, centerZ, radius) {
-    const segmentX = end.x - start.x;
-    const segmentY = end.y - start.y;
-    const segmentZ = end.z - start.z;
+function getSegmentSphereContact(start, end, center, radius) {
+    const segment = {
+        x: end.x - start.x,
+        y: end.y - start.y,
+        z: end.z - start.z
+    };
     const lengthSquared =
-        segmentX * segmentX +
-        segmentY * segmentY +
-        segmentZ * segmentZ;
+        segment.x * segment.x +
+        segment.y * segment.y +
+        segment.z * segment.z;
     const fraction = lengthSquared > 0
         ? clamp(
-            ((centerX - start.x) * segmentX +
-                (centerY - start.y) * segmentY +
-                (centerZ - start.z) * segmentZ) / lengthSquared,
+            ((center.x - start.x) * segment.x +
+                (center.y - start.y) * segment.y +
+                (center.z - start.z) * segment.z) / lengthSquared,
             0,
             1
         )
         : 0;
     const contact = {
-        x: start.x + segmentX * fraction,
-        y: start.y + segmentY * fraction,
-        z: start.z + segmentZ * fraction
+        x: start.x + segment.x * fraction,
+        y: start.y + segment.y * fraction,
+        z: start.z + segment.z * fraction
     };
-    const dx = centerX - contact.x;
-    const dy = centerY - contact.y;
-    const dz = centerZ - contact.z;
+    const dx = center.x - contact.x;
+    const dy = center.y - contact.y;
+    const dz = center.z - contact.z;
     return dx * dx + dy * dy + dz * dz <= radius * radius
         ? contact
         : null;
