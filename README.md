@@ -196,19 +196,35 @@ automatically invoked by this gateway.
 ### Blockchain battle rewards
 
 The service can submit verified battle rewards through the `TankGame` contract.
-Set `BLOCKCHAIN_RPC_URL`, `BLOCKCHAIN_CHAIN_ID`,
-`TANK_COIN_CONTRACT_ADDRESS`, and `TANK_GAME_CONTRACT_ADDRESS` in `.env`, and
-set `GAME_SERVER_PRIVATE_KEY` to a dedicated backend signer key. Configure
-Ethereum Sepolia with chain ID `11155111` and
-`https://ethereum-sepolia-rpc.publicnode.com`. The previously configured
-TankGame has an immutable reference to a TankCoin address with no bytecode, so
-deploy a new TankCoin and TankGame pair before using the economy or battle
-rewards. Follow [`../contract/DEPLOYMENT.md`](../contract/DEPLOYMENT.md) and
-copy the real addresses from `contract/deployments/sepolia.json` into this
-local `.env` and Unity's `GameDirector` component. The deployment assigns
-`MINTER_ROLE` and `GAME_ROLE` to TankGame and only `GAME_SERVER_ROLE` to the
-backend signer; the backend signer must not be a contract admin or token
-minter. Keep the signer key private and never put it in a Unity client.
+using the existing Ethereum Sepolia deployment:
+
+- TankCoin: `0xb9990D003798C454442501dFDBa532b552787A7F`
+- TankGame: `0xD9Ad1F98575B6fE616B2D21fBdE33ecBf56383bE`
+- Chain ID: `11155111`
+
+Both verified contracts are deployed and TankGame references the configured
+TankCoin. TankCoin has 18 decimals and a maximum supply of 1 billion TCOIN.
+TankGame currently exposes `purchaseCoin()` at the on-chain rate of 1,000
+TCOIN per Sepolia ETH, and its administrator-only `withdrawETH(address,uint256)`
+function allows the treasury to withdraw purchase proceeds. The deployed
+TankGame is missing `MINTER_ROLE` and `GAME_ROLE` on TankCoin, so token
+purchases and gameplay rewards remain unavailable until the contract
+administrator grants them. Do not deploy replacement contracts.
+
+Set `BLOCKCHAIN_RPC_URL` and optional comma-separated
+`BLOCKCHAIN_RPC_FALLBACK_URLS` in `.env`; every endpoint is checked for chain
+ID `11155111` before use. Configure the exact contract addresses above,
+`CONTRACT_ADMIN_ADDRESS` (`0x2a8937299ae3D0003Cc43c4619ba4286e2E8916c`),
+and a dedicated backend `GAME_SERVER_ADDRESS`. Keep the matching
+`GAME_SERVER_PRIVATE_KEY` only in the backend environment; it must never be
+put in Unity, WebGL, or Git.
+
+`npm run prepare:blockchain-roles` checks the current Sepolia roles and prints
+unsigned grant transaction data. It does not submit transactions. Only the
+contract administrator should submit these grants. `npm run verify:blockchain`
+checks bytecode, the TankGame-to-TankCoin link, token metadata/cap, exchange
+rate, contract roles, and the backend signer role; it exits unsuccessfully
+while required roles or signer configuration are missing.
 
 After independently verifying a battle result, a trusted dedicated server can
 call `POST /api/server/rewards` with `X-Server-Token` and JSON fields
@@ -226,7 +242,9 @@ linked to only one account. The dedicated server receives the verified wallet
 address as part of join-ticket validation; it must never accept a reward
 destination directly from a game client. Set
 `ABRAMS_ONLINE_KILL_REWARD_WEI` in each dedicated server process to the
-positive integer reward per enemy tank destroyed.
+positive integer reward per enemy tank destroyed. A backend signer also needs
+`GAME_SERVER_ROLE` on TankGame, and TankGame needs `GAME_ROLE` on TankCoin to
+mint those rewards. The contract stores processed battle IDs to block replay.
 
 Do not expose this service or send passwords over plain HTTP on the public
 internet. Terminate HTTPS at a trusted reverse proxy and restrict the service

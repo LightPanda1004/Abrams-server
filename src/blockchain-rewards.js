@@ -4,9 +4,12 @@ const {
     Contract,
     getAddress,
     isAddress,
-    JsonRpcProvider,
     Wallet
 } = require("ethers");
+const {
+    createSepoliaProvider,
+    SEPOLIA_CHAIN_ID
+} = require("./blockchain-rpc");
 
 const TANK_COIN_ABI = [
     "function MINTER_ROLE() view returns (bytes32)",
@@ -31,6 +34,7 @@ async function getBlockchainContract() {
                 "BLOCKCHAIN_CHAIN_ID",
                 "TANK_COIN_CONTRACT_ADDRESS",
                 "TANK_GAME_CONTRACT_ADDRESS",
+                "GAME_SERVER_ADDRESS",
                 "GAME_SERVER_PRIVATE_KEY"
             ];
             const missing = required.filter(name => !process.env[name]);
@@ -43,32 +47,24 @@ async function getBlockchainContract() {
             }
 
             const chainIdText = process.env.BLOCKCHAIN_CHAIN_ID;
-            if (!/^[1-9]\d*$/.test(chainIdText) ||
-                !Number.isSafeInteger(Number(chainIdText))) {
+            if (chainIdText !== SEPOLIA_CHAIN_ID.toString()) {
                 const error = new Error(
-                    "BLOCKCHAIN_CHAIN_ID must be a positive safe integer."
+                    `BLOCKCHAIN_CHAIN_ID must be ${SEPOLIA_CHAIN_ID} (Ethereum Sepolia).`
                 );
                 error.status = 503;
                 throw error;
             }
             if (!isAddress(process.env.TANK_COIN_CONTRACT_ADDRESS) ||
-                !isAddress(process.env.TANK_GAME_CONTRACT_ADDRESS)) {
+                !isAddress(process.env.TANK_GAME_CONTRACT_ADDRESS) ||
+                !isAddress(process.env.GAME_SERVER_ADDRESS)) {
                 const error = new Error(
-                    "TANK_COIN_CONTRACT_ADDRESS and TANK_GAME_CONTRACT_ADDRESS must be valid addresses."
+                    "TANK_COIN_CONTRACT_ADDRESS, TANK_GAME_CONTRACT_ADDRESS, and GAME_SERVER_ADDRESS must be valid addresses."
                 );
                 error.status = 503;
                 throw error;
             }
 
-            const provider = new JsonRpcProvider(process.env.BLOCKCHAIN_RPC_URL);
-            const network = await provider.getNetwork();
-            if (network.chainId !== BigInt(chainIdText)) {
-                const error = new Error(
-                    "Blockchain RPC returned an unexpected chain ID."
-                );
-                error.status = 503;
-                throw error;
-            }
+            const provider = await createSepoliaProvider();
 
             const coinAddress = getAddress(
                 process.env.TANK_COIN_CONTRACT_ADDRESS
@@ -135,6 +131,16 @@ async function getBlockchainContract() {
                 process.env.GAME_SERVER_PRIVATE_KEY,
                 provider
             );
+            const configuredSignerAddress = getAddress(
+                process.env.GAME_SERVER_ADDRESS
+            );
+            if (getAddress(signer.address) !== configuredSignerAddress) {
+                const error = new Error(
+                    "GAME_SERVER_ADDRESS does not match the backend signing key."
+                );
+                error.status = 503;
+                throw error;
+            }
             const gameSigner = new Contract(
                 gameAddress,
                 TANK_GAME_ABI,
@@ -147,7 +153,7 @@ async function getBlockchainContract() {
             );
             if (!signerHasServerRole) {
                 const error = new Error(
-                    "The configured GAME_SERVER_PRIVATE_KEY does not hold GAME_SERVER_ROLE on TankGame."
+                    "The configured GAME_SERVER_ADDRESS does not hold GAME_SERVER_ROLE on TankGame."
                 );
                 error.status = 503;
                 throw error;
