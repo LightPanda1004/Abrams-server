@@ -708,6 +708,134 @@ test("fire confirmations correlate requests and reject shots during reload", () 
     assert.equal(rejected.cooldown, 2);
 });
 
+test("replayed fire request ids cannot create a second projectile", () => {
+    const room = new GameRoom("room-replayed-fire-request");
+    room.addPlayer(player(1));
+    const input = {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        fireRequestId: 55
+    };
+
+    room.setInput("1", input, 10_000);
+    room.setInput("1", { ...input, fire: false }, 10_001);
+    room.setInput("1", input, 13_000);
+
+    assert.equal(room.projectiles.length, 1);
+    assert.equal(room.pendingEvents.filter(event =>
+        event.type === "playerFired"
+    ).length, 1);
+    assert.equal(room.pendingEvents.filter(event =>
+        event.type === "fireRejected" && event.requestId === 55
+    ).length, 1);
+});
+
+test("the owning client can report an environment impact on its projectile path", () => {
+    const room = new GameRoom("room-validated-projectile-impact");
+    room.addPlayer(player(1));
+    room.addPlayer(player(2));
+    const shooter = room.players.get("1");
+    const originX = shooter.x + 2.5;
+
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        fireRequestId: 61,
+        hasFireOrigin: true,
+        fireOriginX: originX,
+        fireOriginY: 2,
+        fireOriginZ: shooter.z,
+        hasFireDirection: true,
+        fireDirectionX: 1,
+        fireDirectionY: 0,
+        fireDirectionZ: 0
+    }, 10_000);
+    const fireEvent = room.pendingEvents.find(event =>
+        event.type === "playerFired"
+    );
+    room.tick(0.05, 10_050);
+
+    assert.equal(room.projectiles.length, 1);
+    const accepted = room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: false,
+        hasProjectileImpact: true,
+        impactProjectileId: fireEvent.projectileId,
+        impactX: originX + 8,
+        impactY: 2,
+        impactZ: shooter.z
+    }, 10_051);
+
+    assert.equal(accepted, true);
+    assert.equal(room.projectiles.length, 0);
+    const impact = room.pendingEvents.find(event =>
+        event.type === "projectileImpact"
+    );
+    assert.equal(impact.attackerId, "1");
+    assert.equal(impact.projectileId, fireEvent.projectileId);
+    assert.equal(impact.x, originX + 8);
+});
+
+test("server rejects projectile impact reports not on the owned shell path", () => {
+    const room = new GameRoom("room-invalid-projectile-impact");
+    room.addPlayer(player(1));
+    room.addPlayer(player(2));
+    const shooter = room.players.get("1");
+    const originX = shooter.x + 2.5;
+
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: true,
+        fireRequestId: 71,
+        hasFireOrigin: true,
+        fireOriginX: originX,
+        fireOriginY: 2,
+        fireOriginZ: shooter.z,
+        hasFireDirection: true,
+        fireDirectionX: 1,
+        fireDirectionY: 0,
+        fireDirectionZ: 0
+    }, 10_000);
+    const projectileId = room.pendingEvents.find(event =>
+        event.type === "playerFired"
+    ).projectileId;
+    room.tick(0.05, 10_050);
+
+    room.setInput("2", {
+        throttle: 0,
+        steering: 0,
+        fire: false,
+        hasProjectileImpact: true,
+        impactProjectileId: projectileId,
+        impactX: originX + 8,
+        impactY: 2,
+        impactZ: shooter.z
+    }, 10_051);
+    assert.equal(room.projectiles.length, 1);
+    assert.equal(room.pendingEvents.some(event =>
+        event.type === "projectileImpact"
+    ), false);
+
+    room.setInput("1", {
+        throttle: 0,
+        steering: 0,
+        fire: false,
+        hasProjectileImpact: true,
+        impactProjectileId: projectileId,
+        impactX: originX + 8,
+        impactY: 2,
+        impactZ: shooter.z + 10
+    }, 10_052);
+    assert.equal(room.projectiles.length, 1);
+    assert.equal(room.pendingEvents.some(event =>
+        event.type === "projectileImpact"
+    ), false);
+});
+
 test("projectile expiry does not create another shot while fire stays held", () => {
     const room = new GameRoom("room-fire-expiry");
     room.addPlayer(player(1));

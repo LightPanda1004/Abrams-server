@@ -93,7 +93,8 @@ class GameRoom {
             deaths: 0,
             alive: true,
             lastFireAt: 0,
-            fireInputPressed: false
+            fireInputPressed: false,
+            lastFireRequestId: 0
         };
         this.players.set(userId, player);
         if (new Set(
@@ -182,6 +183,15 @@ class GameRoom {
                     input.fireDirectionY,
                     input.fireDirectionZ
                 ) <= 0.0001)) ||
+            (input.hasProjectileImpact !== undefined &&
+                typeof input.hasProjectileImpact !== "boolean") ||
+            (input.hasProjectileImpact === true &&
+                (!Number.isSafeInteger(input.impactProjectileId) ||
+                    input.impactProjectileId <= 0 ||
+                    [input.impactX, input.impactY, input.impactZ]
+                        .some(value =>
+                            typeof value !== "number" ||
+                            !Number.isFinite(value)))) ||
             (input.droneActive !== undefined &&
                 typeof input.droneActive !== "boolean") ||
             (input.droneFlying !== undefined &&
@@ -300,15 +310,29 @@ class GameRoom {
 
         const firePressed = input.fire && !player.fireInputPressed;
         player.fireInputPressed = input.fire;
-        if (player.alive && firePressed &&
+        const fireRequestId = input.fireRequestId || 0;
+        if (firePressed && fireRequestId > 0 &&
+            fireRequestId <= player.lastFireRequestId) {
+            this.pendingEvents.push({
+                type: "fireRejected",
+                userId,
+                requestId: fireRequestId,
+                cooldown: Math.max(
+                    0,
+                    FIRE_COOLDOWN_MS - (now - player.lastFireAt)
+                ) / 1000
+            });
+        } else if (player.alive && firePressed &&
             now - player.lastFireAt >= FIRE_COOLDOWN_MS) {
+            if (fireRequestId > 0)
+                player.lastFireRequestId = fireRequestId;
             player.lastFireAt = now;
             const projectile = this.createProjectile(player, now, input);
             this.projectiles.push(projectile);
             this.pendingEvents.push({
                 type: "playerFired",
                 userId,
-                requestId: input.fireRequestId || 0,
+                requestId: fireRequestId,
                 projectileId: projectile.id,
                 cooldown: FIRE_COOLDOWN_MS / 1000,
                 x: projectile.x,
@@ -318,10 +342,11 @@ class GameRoom {
                 pitch: projectile.pitch
             });
         } else if (firePressed && input.fireRequestId > 0) {
+            player.lastFireRequestId = fireRequestId;
             this.pendingEvents.push({
                 type: "fireRejected",
                 userId,
-                requestId: input.fireRequestId,
+                requestId: fireRequestId,
                 cooldown: player.alive
                     ? Math.max(
                         0,
@@ -330,6 +355,54 @@ class GameRoom {
                     : 0
             });
         }
+
+        if (input.hasProjectileImpact === true) {
+            this.processReportedProjectileImpact(userId, input);
+        }
+        return true;
+    }
+
+    processReportedProjectileImpact(userId, input) {
+        const projectileIndex = this.projectiles.findIndex(projectile =>
+            projectile.id === input.impactProjectileId &&
+            projectile.ownerId === userId
+        );
+        if (projectileIndex < 0)
+            return false;
+
+        const projectile = this.projectiles[projectileIndex];
+        const offsetX = input.impactX - projectile.x;
+        const offsetY = input.impactY - projectile.y;
+        const offsetZ = input.impactZ - projectile.z;
+        const along = offsetX * projectile.directionX +
+            offsetY * projectile.directionY +
+            offsetZ * projectile.directionZ;
+        const perpendicularX = offsetX -
+            along * projectile.directionX;
+        const perpendicularY = offsetY -
+            along * projectile.directionY;
+        const perpendicularZ = offsetZ -
+            along * projectile.directionZ;
+        const perpendicularDistance = Math.hypot(
+            perpendicularX,
+            perpendicularY,
+            perpendicularZ
+        );
+        if (along < -30 || along > 20 ||
+            projectile.distance + along > PROJECTILE_RANGE ||
+            perpendicularDistance > 1.5) {
+            return false;
+        }
+
+        this.projectiles.splice(projectileIndex, 1);
+        this.pendingEvents.push({
+            type: "projectileImpact",
+            attackerId: userId,
+            projectileId: projectile.id,
+            x: round(input.impactX),
+            y: round(input.impactY),
+            z: round(input.impactZ)
+        });
         return true;
     }
 
