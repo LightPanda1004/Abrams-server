@@ -743,6 +743,7 @@ test("fire confirmations correlate requests and reject shots during reload", () 
 test("replayed fire request ids cannot create a second projectile", () => {
     const room = new GameRoom("room-replayed-fire-request");
     room.addPlayer(player(1));
+    room.addPlayer(player(2, 2));
     const input = {
         throttle: 0,
         steering: 0,
@@ -751,8 +752,10 @@ test("replayed fire request ids cannot create a second projectile", () => {
     };
 
     room.setInput("1", input, 10_000);
-    room.setInput("1", { ...input, fire: false }, 10_001);
-    room.setInput("1", input, 13_000);
+    for (const replayAt of [11_000, 13_000, 15_000, 20_000]) {
+        room.setInput("1", { ...input, fire: false }, replayAt - 1);
+        room.setInput("1", input, replayAt);
+    }
 
     assert.equal(room.projectiles.length, 1);
     assert.equal(room.pendingEvents.filter(event =>
@@ -760,6 +763,12 @@ test("replayed fire request ids cannot create a second projectile", () => {
     ).length, 1);
     assert.equal(room.pendingEvents.filter(event =>
         event.type === "fireRejected" && event.requestId === 55
+    ).length, 4);
+
+    const sharedState = room.tick(0.05, 20_050);
+    assert.equal(sharedState.projectiles.length, 1);
+    assert.equal(sharedState.events.filter(event =>
+        event.type === "playerFired"
     ).length, 1);
 });
 
