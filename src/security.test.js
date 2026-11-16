@@ -20,9 +20,9 @@ const {
     validRewardAmount,
     validTeam,
     validUsername,
-    walletChallengeMessage,
-    isAllowedOrigin
-} = require("./index");
+    walletChallengeMessage
+} = require("./validation");
+const { isAllowedOrigin } = require("./http-utils");
 
 test("password hashes verify without storing plaintext", async () => {
     const hash = await hashPassword("tankPassword123");

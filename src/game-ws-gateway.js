@@ -7,7 +7,7 @@ const { URL } = require("node:url");
 const { WebSocketServer, WebSocket } = require("ws");
 const { GameRoom, ROOM_CAPACITY } = require("./game-room");
 const { constantTimeEqual } = require("./security");
-const { isAllowedOrigin } = require("./index");
+const { isAllowedOrigin } = require("./http-utils");
 
 const TICK_RATE_MS = 50;
 const ASSIGNMENT_POLL_MS = 3000;
