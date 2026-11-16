@@ -20,6 +20,9 @@ const TURN_SPEED = 45;
 const PROJECTILE_SPEED = 120;
 const PROJECTILE_DAMAGE = 25;
 const PROJECTILE_RANGE = 800;
+const PROJECTILE_BLAST_RADIUS = 5;
+const PROJECTILE_BLAST_FORCE = 250;
+const PROJECTILE_BLAST_UPWARDS_MODIFIER = 0.5;
 const FIRE_COOLDOWN_MS = 3000;
 
 function clamp(value, minimum, maximum) {
@@ -401,7 +404,10 @@ class GameRoom {
             projectileId: projectile.id,
             x: round(input.impactX),
             y: round(input.impactY),
-            z: round(input.impactZ)
+            z: round(input.impactZ),
+            blastRadius: PROJECTILE_BLAST_RADIUS,
+            blastForce: PROJECTILE_BLAST_FORCE,
+            blastUpwardsModifier: PROJECTILE_BLAST_UPWARDS_MODIFIER
         });
         return true;
     }
@@ -679,7 +685,11 @@ class GameRoom {
                         x: round(impact.x),
                         y: round(impact.y),
                         z: round(impact.z),
-                        projectileId: projectile.id
+                        projectileId: projectile.id,
+                        blastRadius: PROJECTILE_BLAST_RADIUS,
+                        blastForce: PROJECTILE_BLAST_FORCE,
+                        blastUpwardsModifier:
+                            PROJECTILE_BLAST_UPWARDS_MODIFIER
                     });
                 } else {
                     target.health = Math.max(
@@ -694,7 +704,11 @@ class GameRoom {
                         x: round(impact.x),
                         y: round(impact.y),
                         z: round(impact.z),
-                        projectileId: projectile.id
+                        projectileId: projectile.id,
+                        blastRadius: PROJECTILE_BLAST_RADIUS,
+                        blastForce: PROJECTILE_BLAST_FORCE,
+                        blastUpwardsModifier:
+                            PROJECTILE_BLAST_UPWARDS_MODIFIER
                     });
                     this.handleTankDestroyed(target, projectile.ownerId);
                 }
@@ -711,7 +725,11 @@ class GameRoom {
                     x: round(impact.x),
                     y: round(impact.y),
                     z: round(impact.z),
-                    projectileId: projectile.id
+                    projectileId: projectile.id,
+                    blastRadius: PROJECTILE_BLAST_RADIUS,
+                    blastForce: PROJECTILE_BLAST_FORCE,
+                    blastUpwardsModifier:
+                        PROJECTILE_BLAST_UPWARDS_MODIFIER
                 });
                 continue;
             }

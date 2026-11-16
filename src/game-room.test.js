@@ -390,9 +390,13 @@ test("one server projectile damages only one tank once", () => {
     }, 10_000);
     const hitState = room.tick(0.05, 10_050);
     assert.equal(target.health, 175);
-    assert.equal(hitState.events.filter(event =>
+    const hitEvents = hitState.events.filter(event =>
         event.type === "playerHit"
-    ).length, 1);
+    );
+    assert.equal(hitEvents.length, 1);
+    assert.equal(hitEvents[0].blastRadius, 5);
+    assert.equal(hitEvents[0].blastForce, 250);
+    assert.equal(hitEvents[0].blastUpwardsModifier, 0.5);
     assert.equal(hitState.projectiles.length, 0);
 
     room.tick(0.05, 10_100);
@@ -777,6 +781,9 @@ test("the owning client can report an environment impact on its projectile path"
     assert.equal(impact.attackerId, "1");
     assert.equal(impact.projectileId, fireEvent.projectileId);
     assert.equal(impact.x, originX + 8);
+    assert.equal(impact.blastRadius, 5);
+    assert.equal(impact.blastForce, 250);
+    assert.equal(impact.blastUpwardsModifier, 0.5);
 });
 
 test("server rejects projectile impact reports not on the owned shell path", () => {
