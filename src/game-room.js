@@ -20,9 +20,6 @@ const TURN_SPEED = 45;
 const PROJECTILE_SPEED = 120;
 const PROJECTILE_DAMAGE = 25;
 const PROJECTILE_RANGE = 800;
-const PROJECTILE_BLAST_RADIUS = 5;
-const PROJECTILE_BLAST_FORCE = 250;
-const PROJECTILE_BLAST_UPWARDS_MODIFIER = 0.5;
 const FIRE_COOLDOWN_MS = 3000;
 
 function clamp(value, minimum, maximum) {
@@ -123,6 +120,9 @@ class GameRoom {
         this.players.delete(userId);
         this.projectiles = this.projectiles.filter(
             projectile => projectile.ownerId !== userId
+        );
+        this.pendingEvents = this.pendingEvents.filter(event =>
+            event.userId !== userId && event.attackerId !== userId
         );
         this.pendingEvents.push({ type: "playerLeft", userId });
         if (checkVictory)
@@ -404,10 +404,7 @@ class GameRoom {
             projectileId: projectile.id,
             x: round(input.impactX),
             y: round(input.impactY),
-            z: round(input.impactZ),
-            blastRadius: PROJECTILE_BLAST_RADIUS,
-            blastForce: PROJECTILE_BLAST_FORCE,
-            blastUpwardsModifier: PROJECTILE_BLAST_UPWARDS_MODIFIER
+            z: round(input.impactZ)
         });
         return true;
     }
@@ -685,11 +682,7 @@ class GameRoom {
                         x: round(impact.x),
                         y: round(impact.y),
                         z: round(impact.z),
-                        projectileId: projectile.id,
-                        blastRadius: PROJECTILE_BLAST_RADIUS,
-                        blastForce: PROJECTILE_BLAST_FORCE,
-                        blastUpwardsModifier:
-                            PROJECTILE_BLAST_UPWARDS_MODIFIER
+                        projectileId: projectile.id
                     });
                 } else {
                     target.health = Math.max(
@@ -704,11 +697,7 @@ class GameRoom {
                         x: round(impact.x),
                         y: round(impact.y),
                         z: round(impact.z),
-                        projectileId: projectile.id,
-                        blastRadius: PROJECTILE_BLAST_RADIUS,
-                        blastForce: PROJECTILE_BLAST_FORCE,
-                        blastUpwardsModifier:
-                            PROJECTILE_BLAST_UPWARDS_MODIFIER
+                        projectileId: projectile.id
                     });
                     this.handleTankDestroyed(target, projectile.ownerId);
                 }
@@ -725,11 +714,7 @@ class GameRoom {
                     x: round(impact.x),
                     y: round(impact.y),
                     z: round(impact.z),
-                    projectileId: projectile.id,
-                    blastRadius: PROJECTILE_BLAST_RADIUS,
-                    blastForce: PROJECTILE_BLAST_FORCE,
-                    blastUpwardsModifier:
-                        PROJECTILE_BLAST_UPWARDS_MODIFIER
+                    projectileId: projectile.id
                 });
                 continue;
             }

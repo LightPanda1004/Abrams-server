@@ -33,6 +33,38 @@ test("room enforces team selection and one active connection per account", () =>
     );
 });
 
+test("rejoining after leaving starts with fresh state and no stale events", () => {
+    const room = new GameRoom("room-rejoin-reset");
+    room.addPlayer(player(1, 1));
+    room.setInput("1", {
+        throttle: 1,
+        steering: 0,
+        fire: true,
+        fireRequestId: 1
+    }, 10_000);
+    room.tick(0.1, 10_100);
+    assert.equal(room.projectiles.length, 1);
+    assert.equal(room.players.get("1").health, 200);
+
+    assert.equal(room.removePlayer("1"), true);
+    assert.equal(room.projectiles.length, 0);
+    room.addPlayer(player(1, 2));
+
+    const rejoined = room.players.get("1");
+    assert.equal(rejoined.team, 2);
+    assert.equal(rejoined.health, 200);
+    assert.equal(rejoined.x, 24);
+    assert.equal(rejoined.speed, 0);
+    assert.equal(rejoined.lastFireAt, 0);
+    assert.equal(rejoined.lastFireRequestId, 0);
+    assert.equal(room.pendingEvents.some(event =>
+        event.type === "playerFired" && event.userId === "1"
+    ), false);
+    assert.equal(room.pendingEvents.some(event =>
+        event.type === "playerLeft" && event.userId === "1"
+    ), true);
+});
+
 test("server clamps movement input and keeps players inside the arena", () => {
     const room = new GameRoom("room-3");
     room.addPlayer(player(1));
@@ -390,13 +422,9 @@ test("one server projectile damages only one tank once", () => {
     }, 10_000);
     const hitState = room.tick(0.05, 10_050);
     assert.equal(target.health, 175);
-    const hitEvents = hitState.events.filter(event =>
+    assert.equal(hitState.events.filter(event =>
         event.type === "playerHit"
-    );
-    assert.equal(hitEvents.length, 1);
-    assert.equal(hitEvents[0].blastRadius, 5);
-    assert.equal(hitEvents[0].blastForce, 250);
-    assert.equal(hitEvents[0].blastUpwardsModifier, 0.5);
+    ).length, 1);
     assert.equal(hitState.projectiles.length, 0);
 
     room.tick(0.05, 10_100);
@@ -781,9 +809,6 @@ test("the owning client can report an environment impact on its projectile path"
     assert.equal(impact.attackerId, "1");
     assert.equal(impact.projectileId, fireEvent.projectileId);
     assert.equal(impact.x, originX + 8);
-    assert.equal(impact.blastRadius, 5);
-    assert.equal(impact.blastForce, 250);
-    assert.equal(impact.blastUpwardsModifier, 0.5);
 });
 
 test("server rejects projectile impact reports not on the owned shell path", () => {
