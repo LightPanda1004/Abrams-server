@@ -34,8 +34,14 @@ const allowedOrigins = new Set(
         .map(origin => origin.trim())
         .filter(Boolean)
 );
+const TANK_COIN_ABI = [
+    "function MINTER_ROLE() view returns (bytes32)",
+    "function GAME_ROLE() view returns (bytes32)",
+    "function hasRole(bytes32 role, address account) view returns (bool)"
+];
 const TANK_GAME_ABI = [
     "function hasRole(bytes32 role, address account) view returns (bool)",
+    "function GAME_SERVER_ROLE() view returns (bytes32)",
     "function processedBattleIds(bytes32 battleId) view returns (bool)",
     "function coin() view returns (address)",
     "function rewardDestroyEnemy(address player, uint256 amount, string reason, bytes32 battleId)"
@@ -454,7 +460,11 @@ async function getBlockchainContract() {
 
             const gameReader = new Contract(
                 gameAddress,
-                ["function coin() view returns (address)"],
+                [
+                    "function coin() view returns (address)",
+                    "function hasRole(bytes32 role, address account) view returns (bool)",
+                    "function GAME_SERVER_ROLE() view returns (bytes32)"
+                ],
                 provider
             );
             const linkedCoinAddress = getAddress(await gameReader.coin());
@@ -466,12 +476,48 @@ async function getBlockchainContract() {
                 throw error;
             }
 
+            const coinReader = new Contract(
+                coinAddress,
+                TANK_COIN_ABI,
+                provider
+            );
+            const minterRole = await coinReader.MINTER_ROLE();
+            const gameRole = await coinReader.GAME_ROLE();
+            const tankGameHasMinterRole = await coinReader.hasRole(
+                minterRole,
+                gameAddress
+            );
+            const tankGameHasGameRole = await coinReader.hasRole(
+                gameRole,
+                gameAddress
+            );
+            if (!tankGameHasMinterRole || !tankGameHasGameRole) {
+                const error = new Error(
+                    "TankGame is missing the required MINTER_ROLE or GAME_ROLE on TankCoin."
+                );
+                error.status = 503;
+                throw error;
+            }
+
             const signer = new Wallet(process.env.GAME_SERVER_PRIVATE_KEY, provider);
-            return new Contract(
+            const gameSigner = new Contract(
                 gameAddress,
                 TANK_GAME_ABI,
                 signer
             );
+            const serverRole = await gameReader.GAME_SERVER_ROLE();
+            const signerHasServerRole = await gameReader.hasRole(
+                serverRole,
+                signer.address
+            );
+            if (!signerHasServerRole) {
+                const error = new Error(
+                    "The configured GAME_SERVER_PRIVATE_KEY does not hold GAME_SERVER_ROLE on TankGame."
+                );
+                error.status = 503;
+                throw error;
+            }
+            return gameSigner;
         })().catch(error => {
             blockchainContractPromise = undefined;
             throw error;

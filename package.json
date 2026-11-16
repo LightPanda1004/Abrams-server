@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node --env-file=.env src/index.js",
     "start:game-ws-gateway": "node --env-file=.env src/game-ws-gateway.js",
+    "verify:blockchain": "node --env-file=.env scripts/verify-sepolia-setup.js",
     "test": "node --test"
   },
   "engines": {
