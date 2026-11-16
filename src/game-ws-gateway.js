@@ -105,6 +105,10 @@ function getConfig() {
 }
 
 function sendJson(socket, value) {
+    return sendSerialized(socket, JSON.stringify(value));
+}
+
+function sendSerialized(socket, serialized) {
     if (socket.readyState !== WebSocket.OPEN)
         return false;
     if (socket.bufferedAmount > MAX_BUFFERED_BYTES) {
@@ -116,7 +120,7 @@ function sendJson(socket, value) {
         return false;
     }
 
-    socket.send(JSON.stringify(value), error => {
+    socket.send(serialized, error => {
         if (!error)
             return;
         console.warn(JSON.stringify({
@@ -264,8 +268,9 @@ function createGateway(config) {
     }
 
     function broadcastState(roomRuntime, state) {
+        const serialized = JSON.stringify(state);
         for (const socket of roomRuntime.sockets.values()) {
-            sendJson(socket, state);
+            sendSerialized(socket, serialized);
         }
     }
 
