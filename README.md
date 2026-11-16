@@ -69,7 +69,11 @@ the player and releases the database membership. A room with no remaining
 players is then completed. Fire inputs are one-shot press edges, so a held or
 duplicated input packet cannot fire again until the client reports a release.
 Authenticated gateway coordination traffic is isolated from player request
-limits.
+limits. The gateway actively pings WebSocket clients and terminates stale
+connections after the configured pong timeout; this marks only that player
+disconnected and leaves the room running during the reconnect grace period.
+Server and per-room membership heartbeats run independently so a slow database
+membership update cannot stall the server availability heartbeat.
 
 Configure these values in the same `.env` used by the API. For local
 development:
@@ -81,7 +85,12 @@ ABRAMS_ONLINE_WS_PUBLIC_URL=ws://localhost:7777/game
 ABRAMS_ONLINE_WS_PORT=7777
 ABRAMS_ONLINE_MAX_PLAYERS=32
 ABRAMS_ONLINE_RECONNECT_GRACE_MS=30000
+ABRAMS_ONLINE_WS_PING_INTERVAL_MS=10000
+ABRAMS_ONLINE_WS_PONG_TIMEOUT_MS=20000
 ```
+
+The WebSocket ping interval must be between 1 and 60 seconds. The pong timeout
+must be longer than the ping interval and no more than 120 seconds.
 
 Keep `SERVER_API_TOKEN` identical for the API and gateway; never put it in the
 Unity client. For local development, the API permits localhost browser

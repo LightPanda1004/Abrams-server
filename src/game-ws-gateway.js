@@ -12,9 +12,13 @@ const { isAllowedOrigin } = require("./index");
 const TICK_RATE_MS = 50;
 const ASSIGNMENT_POLL_MS = 3000;
 const HEARTBEAT_MS = 5000;
+const MEMBER_HEARTBEAT_MS = 15_000;
+const WS_PING_INTERVAL_MS = 10_000;
+const WS_PONG_TIMEOUT_MS = 20_000;
 const EMPTY_ROOM_GRACE_MS = 30_000;
 const DEFAULT_RECONNECT_GRACE_MS = 30_000;
 const MAX_MESSAGES_PER_SECOND = 30;
+const MAX_BUFFERED_BYTES = 1_048_576;
 
 function requiredEnv(name) {
     const value = process.env[name];
@@ -46,6 +50,14 @@ function getConfig() {
         process.env.ABRAMS_ONLINE_RECONNECT_GRACE_MS ||
         DEFAULT_RECONNECT_GRACE_MS
     );
+    const wsPingIntervalMs = Number(
+        process.env.ABRAMS_ONLINE_WS_PING_INTERVAL_MS ||
+        WS_PING_INTERVAL_MS
+    );
+    const wsPongTimeoutMs = Number(
+        process.env.ABRAMS_ONLINE_WS_PONG_TIMEOUT_MS ||
+        WS_PONG_TIMEOUT_MS
+    );
     const serverToken = requiredEnv("SERVER_API_TOKEN");
     if (!["http:", "https:"].includes(apiUrl.protocol) ||
         !validServerId(serverId) ||
@@ -57,6 +69,11 @@ function getConfig() {
         maxPlayers > ROOM_CAPACITY ||
         !Number.isInteger(reconnectGraceMs) ||
         reconnectGraceMs < 0 || reconnectGraceMs > 300_000 ||
+        !Number.isInteger(wsPingIntervalMs) ||
+        wsPingIntervalMs < 1000 || wsPingIntervalMs > 60_000 ||
+        !Number.isInteger(wsPongTimeoutMs) ||
+        wsPongTimeoutMs <= wsPingIntervalMs ||
+        wsPongTimeoutMs > 120_000 ||
         serverToken.length < 32) {
         throw new Error("Dedicated WebSocket server configuration is invalid.");
     }
@@ -81,14 +98,34 @@ function getConfig() {
         port,
         maxPlayers,
         reconnectGraceMs,
+        wsPingIntervalMs,
+        wsPongTimeoutMs,
         serverToken
     };
 }
 
 function sendJson(socket, value) {
-    if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify(value));
+    if (socket.readyState !== WebSocket.OPEN)
+        return false;
+    if (socket.bufferedAmount > MAX_BUFFERED_BYTES) {
+        console.warn(JSON.stringify({
+            event: "client_backpressure_disconnect",
+            bufferedBytes: socket.bufferedAmount
+        }));
+        socket.close(4009, "Client is not consuming room updates.");
+        return false;
     }
+
+    socket.send(JSON.stringify(value), error => {
+        if (!error)
+            return;
+        console.warn(JSON.stringify({
+            event: "client_send_failed",
+            error: error.message
+        }));
+        socket.terminate();
+    });
+    return true;
 }
 
 function createGateway(config) {
@@ -102,7 +139,8 @@ function createGateway(config) {
     const roomsById = new Map();
     let stopping = false;
     let assignmentPollPromise = null;
-    let heartbeatPromise = null;
+    let serverHeartbeatPromise = null;
+    const memberHeartbeatPromises = new Map();
 
     function createRoomRuntime(roomId) {
         return {
@@ -296,7 +334,7 @@ function createGateway(config) {
         });
     }
 
-    function disconnectPlayer(socket, userId) {
+    function disconnectPlayer(socket, userId, closeCode, closeReason) {
         const connection = socketsByUserId.get(userId);
         if (!userId || !connection || connection.socket !== socket) {
             return;
@@ -327,6 +365,8 @@ function createGateway(config) {
                 event: "player_disconnected",
                 roomId: roomRuntime.id,
                 userId,
+                closeCode,
+                closeReason,
                 graceExpiresAt: disconnectedAt + config.reconnectGraceMs,
                 serverId: config.serverId
             }));
@@ -439,10 +479,10 @@ function createGateway(config) {
         const authenticationTimer = setTimeout(() => {
             socket.close(4001, "Authentication required.");
         }, 5000);
+        socket.lastPongAt = Date.now();
         socket.on("pong", () => {
-            socket.isAlive = true;
+            socket.lastPongAt = Date.now();
         });
-        socket.isAlive = true;
         socket.on("message", async raw => {
             const now = Date.now();
             if (now - messageWindowStart >= 1000) {
@@ -569,6 +609,8 @@ function createGateway(config) {
                     roomId = ticketRoomId;
                     roomRuntime.sockets.set(userId, socket);
                     socketsByUserId.set(userId, { socket, roomId });
+                    socket.userId = userId;
+                    socket.roomId = roomId;
                     sendJson(socket, {
                         type: "authenticated",
                         roomId,
@@ -610,9 +652,14 @@ function createGateway(config) {
                 socket.close(4002, "Invalid game input.");
             }
         });
-        socket.on("close", () => {
+        socket.on("close", (code, reason) => {
             clearTimeout(authenticationTimer);
-            disconnectPlayer(socket, userId);
+            disconnectPlayer(
+                socket,
+                userId,
+                code,
+                reason.toString("utf8")
+            );
         });
         socket.on("error", error => {
             console.warn("Game WebSocket error:", error.message);
@@ -638,38 +685,84 @@ function createGateway(config) {
             console.error("Could not poll room assignment:", error.message);
         });
     }, ASSIGNMENT_POLL_MS);
-    const heartbeatTimer = setInterval(() => {
-        if (heartbeatPromise) {
+    const serverHeartbeatTimer = setInterval(() => {
+        if (serverHeartbeatPromise)
             return;
-        }
-        const heartbeats = [
-            apiRequest("/api/server/heartbeat", { id: config.serverId })
-                .catch(error => {
-                    console.error("Dedicated-server heartbeat failed:", error.message);
-                })
-        ];
+        serverHeartbeatPromise = apiRequest(
+            "/api/server/heartbeat",
+            { id: config.serverId }
+        ).catch(error => {
+            console.error(JSON.stringify({
+                event: "server_heartbeat_failed",
+                serverId: config.serverId,
+                error: error.message
+            }));
+        }).finally(() => {
+            serverHeartbeatPromise = null;
+        });
+    }, HEARTBEAT_MS);
+
+    const memberHeartbeatTimer = setInterval(() => {
         for (const roomRuntime of roomsById.values()) {
             if (roomRuntime.gameRoom.players.size === 0)
                 continue;
-            heartbeats.push(
-                apiRequest(
-                    `/api/server/rooms/${encodeURIComponent(roomRuntime.id)}/members/heartbeat`,
-                    {
-                        serverId: config.serverId,
-                        userIds: [...roomRuntime.sockets.keys()]
-                    }
-                ).catch(error => {
-                    console.error(
-                        `Room ${roomRuntime.id} member heartbeat failed:`,
-                        error.message
-                    );
-                })
-            );
+            if (memberHeartbeatPromises.has(roomRuntime.id))
+                continue;
+
+            const roomId = roomRuntime.id;
+            const heartbeat = apiRequest(
+                `/api/server/rooms/${encodeURIComponent(roomId)}/members/heartbeat`,
+                {
+                    serverId: config.serverId,
+                    userIds: [...roomRuntime.sockets.keys()]
+                }
+            ).catch(error => {
+                console.error(JSON.stringify({
+                    event: "room_member_heartbeat_failed",
+                    roomId,
+                    serverId: config.serverId,
+                    error: error.message
+                }));
+            }).finally(() => {
+                if (memberHeartbeatPromises.get(roomId) === heartbeat)
+                    memberHeartbeatPromises.delete(roomId);
+            });
+            memberHeartbeatPromises.set(roomId, heartbeat);
         }
-        heartbeatPromise = Promise.all(heartbeats).finally(() => {
-            heartbeatPromise = null;
-        });
-    }, HEARTBEAT_MS);
+    }, MEMBER_HEARTBEAT_MS);
+
+    const websocketHeartbeatTimer = setInterval(() => {
+        const now = Date.now();
+        const pongTimeoutMs =
+            config.wsPongTimeoutMs || WS_PONG_TIMEOUT_MS;
+        for (const socket of webSockets.clients) {
+            if (socket.readyState !== WebSocket.OPEN)
+                continue;
+            if (now - socket.lastPongAt > pongTimeoutMs) {
+                console.warn(JSON.stringify({
+                    event: "client_heartbeat_timeout",
+                    roomId: socket.roomId || "",
+                    userId: socket.userId || "",
+                    serverId: config.serverId
+                }));
+                socket.terminate();
+                continue;
+            }
+
+            socket.ping(error => {
+                if (!error)
+                    return;
+                console.warn(JSON.stringify({
+                    event: "client_ping_failed",
+                    roomId: socket.roomId || "",
+                    userId: socket.userId || "",
+                    serverId: config.serverId,
+                    error: error.message
+                }));
+                socket.terminate();
+            });
+        }
+    }, config.wsPingIntervalMs || WS_PING_INTERVAL_MS);
 
     return {
         server: app,
@@ -693,7 +786,9 @@ function createGateway(config) {
             stopping = true;
             clearInterval(tickTimer);
             clearInterval(assignmentTimer);
-            clearInterval(heartbeatTimer);
+            clearInterval(serverHeartbeatTimer);
+            clearInterval(memberHeartbeatTimer);
+            clearInterval(websocketHeartbeatTimer);
             for (const connection of socketsByUserId.values()) {
                 connection.socket.close(
                     1001,
